@@ -14,6 +14,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps face_recognition==1.3.0
 
 COPY . .
 
