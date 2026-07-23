@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block titulo %}Login{% endblock %}
+{% block conteudo %}
+<div class="card">
+  <h2>Entrar</h2>
+  <form method="POST">
+    <label>E-mail</label>
+    <input type="email" name="email" required autofocus>
+
+    <label>Senha</label>
+    <input type="password" name="senha" required>
+
+    <button type="submit">Entrar</button>
+  </form>
+</div>
+{% endblock %}

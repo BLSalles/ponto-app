@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block titulo %}Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <h2>Cadastrar Colaborador</h2>
+  <form id="form-cadastro" method="POST" action="{{ url_for('cadastrar_colaborador') }}">
+    <label>Nome</label>
+    <input type="text" name="nome" required>
+
+    <label>E-mail</label>
+    <input type="email" name="email" required>
+
+    <label>Senha provisória</label>
+    <input type="password" name="senha" required>
+
+    <label>Foto do rosto (para reconhecimento)</label>
+    <video id="video-cadastro" autoplay playsinline width="240" height="180"></video>
+    <canvas id="canvas-cadastro" width="240" height="180" style="display:none;"></canvas>
+    <button type="button" id="btn-tirar-foto">Capturar Foto</button>
+    <p id="foto-status">Nenhuma foto capturada.</p>
+    <input type="hidden" name="foto" id="input-foto">
+
+    <button type="submit">Cadastrar</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Colaboradores</h2>
+  <ul>
+    {% for c in colaboradores %}
+      <li>{{ c.nome }} — {{ c.email }} {% if not c.face_encoding %}<strong>(sem rosto cadastrado)</strong>{% endif %}</li>
+    {% endfor %}
+  </ul>
+</div>
+
+<div class="card">
+  <h2>Registros de Ponto</h2>
+  <a href="{{ url_for('exportar_csv') }}">Exportar CSV</a>
+  <table>
+    <thead>
+      <tr>
+        <th>Colaborador</th>
+        <th>Data/Hora (UTC)</th>
+        <th>Localização</th>
+        <th>Confiança facial</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in registros %}
+      <tr>
+        <td>{{ r.colaborador.nome }}</td>
+        <td>{{ r.data_hora.strftime('%d/%m/%Y %H:%M:%S') }}</td>
+        <td>
+          {% if r.latitude and r.longitude %}
+            <a href="https://www.google.com/maps?q={{ r.latitude }},{{ r.longitude }}" target="_blank">
+              {{ "%.5f"|format(r.latitude) }}, {{ "%.5f"|format(r.longitude) }}
+            </a>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>{{ "%.3f"|format(r.distancia_facial) if r.distancia_facial is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+const video = document.getElementById('video-cadastro');
+const canvas = document.getElementById('canvas-cadastro');
+const btnFoto = document.getElementById('btn-tirar-foto');
+const inputFoto = document.getElementById('input-foto');
+const fotoStatus = document.getElementById('foto-status');
+
+navigator.mediaDevices.getUserMedia({ video: true })
+  .then(stream => { video.srcObject = stream; })
+  .catch(() => { fotoStatus.textContent = 'Não foi possível acessar a câmera.'; });
+
+btnFoto.addEventListener('click', () => {
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  inputFoto.value = canvas.toDataURL('image/jpeg', 0.8);
+  fotoStatus.textContent = 'Foto capturada com sucesso.';
+});
+</script>
+{% endblock %}

@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block titulo %}Bater Ponto{% endblock %}
+{% block conteudo %}
+<div class="card">
+  <h2>Registrar Ponto</h2>
+  <p>Posicione seu rosto na câmera e clique em "Bater Ponto".</p>
+
+  <video id="video" autoplay playsinline width="320" height="240"></video>
+  <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+
+  <p id="status-localizacao">Obtendo localização...</p>
+  <button id="btn-registrar" disabled>Bater Ponto</button>
+  <p id="resultado"></p>
+</div>
+
+<script>
+let latitude = null;
+let longitude = null;
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const btnRegistrar = document.getElementById('btn-registrar');
+const statusLoc = document.getElementById('status-localizacao');
+const resultado = document.getElementById('resultado');
+
+// Câmera
+navigator.mediaDevices.getUserMedia({ video: true })
+  .then(stream => { video.srcObject = stream; })
+  .catch(() => { resultado.textContent = 'Não foi possível acessar a câmera.'; });
+
+// Geolocalização
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      latitude = pos.coords.latitude;
+      longitude = pos.coords.longitude;
+      statusLoc.textContent = 'Localização obtida.';
+      btnRegistrar.disabled = false;
+    },
+    () => {
+      statusLoc.textContent = 'Não foi possível obter a localização. Permita o acesso e recarregue a página.';
+    }
+  );
+} else {
+  statusLoc.textContent = 'Geolocalização não suportada neste navegador.';
+}
+
+btnRegistrar.addEventListener('click', () => {
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const foto = canvas.toDataURL('image/jpeg', 0.8);
+
+  btnRegistrar.disabled = true;
+  resultado.textContent = 'Registrando...';
+
+  fetch('/api/registrar-ponto', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ foto, latitude, longitude })
+  })
+    .then(r => r.json())
+    .then(data => {
+      resultado.textContent = data.mensagem;
+      btnRegistrar.disabled = false;
+    })
+    .catch(() => {
+      resultado.textContent = 'Erro ao registrar o ponto.';
+      btnRegistrar.disabled = false;
+    });
+});
+</script>
+{% endblock %}
