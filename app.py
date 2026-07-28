@@ -3,7 +3,9 @@ import io
 import csv
 import base64
 import numpy as np
+import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from functools import wraps
 
 from flask import (
@@ -34,6 +36,33 @@ db = SQLAlchemy(app)
 # Quanto menor, mais rígido. 0.6 é o padrão da biblioteca face_recognition.
 FACE_MATCH_TOLERANCE = 0.55
 
+# ---------------------------------------------------------------------------
+# Fuso horário - Brasília
+# ---------------------------------------------------------------------------
+TZ_UTC = ZoneInfo("UTC")
+TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
+
+
+def agora_brasilia():
+    """Retorna o instante atual já ciente do fuso horário de Brasília."""
+    return datetime.now(TZ_BRASILIA)
+
+
+def para_brasilia(dt):
+    """Converte um datetime (armazenado em UTC, naive ou aware) para o horário de Brasília."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ_UTC)
+    return dt.astimezone(TZ_BRASILIA)
+
+
+@app.template_filter("brasilia")
+def filtro_brasilia(dt, fmt="%d/%m/%Y %H:%M:%S"):
+    """Filtro Jinja: {{ registro.data_hora | brasilia }}"""
+    dt_local = para_brasilia(dt)
+    return dt_local.strftime(fmt) if dt_local else "—"
+
 
 # ---------------------------------------------------------------------------
 # Modelos
@@ -60,6 +89,7 @@ class RegistroPonto(db.Model):
     data_hora = db.Column(db.DateTime, default=datetime.utcnow)
     latitude = db.Column(db.Float, nullable=True)
     longitude = db.Column(db.Float, nullable=True)
+    endereco = db.Column(db.String(255), nullable=True)  # endereço legível obtido por geocodificação reversa
     distancia_facial = db.Column(db.Float, nullable=True)  # quão próximo do rosto cadastrado
     tipo = db.Column(db.String(20), default="entrada")  # entrada / saida (opcional)
 
@@ -103,6 +133,31 @@ def imagem_base64_para_encoding(imagem_base64):
     return encodings[0]
 
 
+def obter_endereco(latitude, longitude):
+    """Converte latitude/longitude em um endereço legível via geocodificação reversa (Nominatim/OpenStreetMap).
+    Retorna None se as coordenadas não vierem ou se a consulta falhar (sem quebrar o registro do ponto)."""
+    if latitude is None or longitude is None:
+        return None
+    try:
+        resposta = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "jsonv2",
+                "lat": latitude,
+                "lon": longitude,
+                "zoom": 18,
+                "addressdetails": 1,
+            },
+            headers={"User-Agent": "controle-ponto-app/1.0"},
+            timeout=5,
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+        return dados.get("display_name")
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Rotas - autenticação
 # ---------------------------------------------------------------------------
@@ -122,7 +177,7 @@ def login():
             session["nome"] = user.nome
             session["is_gestor"] = user.is_gestor
             if user.is_gestor:
-                return redirect(url_for("gestor_dashboard"))
+                return redirect(url_for("gestor_consulta"))
             return redirect(url_for("ponto"))
         flash("E-mail ou senha inválidos.")
     return render_template("login.html")
@@ -173,18 +228,28 @@ def registrar_ponto():
             "mensagem": "O rosto não confere com o cadastrado. Registro não realizado."
         }), 403
 
+    endereco = obter_endereco(latitude, longitude)
+
     registro = RegistroPonto(
         colaborador_id=user.id,
         latitude=latitude,
         longitude=longitude,
+        endereco=endereco,
         distancia_facial=float(distancia),
     )
     db.session.add(registro)
     db.session.commit()
 
+    horario_local = para_brasilia(registro.data_hora)
+    mensagem = f"Ponto registrado às {horario_local.strftime('%d/%m/%Y %H:%M:%S')} (horário de Brasília)."
+    if endereco:
+        mensagem += f" Local: {endereco}."
     return jsonify({
         "ok": True,
-        "mensagem": f"Ponto registrado às {registro.data_hora.strftime('%d/%m/%Y %H:%M:%S')} (UTC).",
+        "mensagem": mensagem,
+        "horario": horario_local.strftime("%H:%M:%S"),
+        "data": horario_local.strftime("%d/%m/%Y"),
+        "endereco": endereco,
     })
 
 
@@ -194,11 +259,39 @@ def registrar_ponto():
 @app.route("/gestor", methods=["GET"])
 @gestor_required
 def gestor_dashboard():
+    return redirect(url_for("gestor_consulta"))
+
+
+@app.route("/gestor/consulta", methods=["GET"])
+@gestor_required
+def gestor_consulta():
     registros = (
         RegistroPonto.query.order_by(RegistroPonto.data_hora.desc()).limit(200).all()
     )
-    colaboradores = Colaborador.query.filter_by(is_gestor=False).all()
-    return render_template("gestor.html", registros=registros, colaboradores=colaboradores)
+    colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
+
+    hoje_brasilia = agora_brasilia().date()
+    registros_hoje = sum(
+        1 for r in registros if para_brasilia(r.data_hora).date() == hoje_brasilia
+    )
+    total_colaboradores = len(colaboradores)
+    sem_cadastro_facial = sum(1 for c in colaboradores if not c.face_encoding)
+
+    return render_template(
+        "gestor_consulta.html",
+        registros=registros,
+        colaboradores=colaboradores,
+        registros_hoje=registros_hoje,
+        total_colaboradores=total_colaboradores,
+        sem_cadastro_facial=sem_cadastro_facial,
+    )
+
+
+@app.route("/gestor/cadastro", methods=["GET"])
+@gestor_required
+def gestor_cadastro():
+    colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
+    return render_template("gestor_cadastro.html", colaboradores=colaboradores)
 
 
 @app.route("/gestor/cadastrar", methods=["POST"])
@@ -211,7 +304,7 @@ def cadastrar_colaborador():
 
     if Colaborador.query.filter_by(email=email).first():
         flash("Já existe um colaborador com esse e-mail.")
-        return redirect(url_for("gestor_dashboard"))
+        return redirect(url_for("gestor_cadastro"))
 
     novo = Colaborador(nome=nome, email=email, is_gestor=False)
     novo.set_senha(senha)
@@ -226,7 +319,7 @@ def cadastrar_colaborador():
     db.session.add(novo)
     db.session.commit()
     flash(f"Colaborador {nome} cadastrado com sucesso.")
-    return redirect(url_for("gestor_dashboard"))
+    return redirect(url_for("gestor_cadastro"))
 
 
 @app.route("/gestor/exportar-csv")
@@ -236,11 +329,13 @@ def exportar_csv():
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Colaborador", "Data/Hora (UTC)", "Latitude", "Longitude", "Distância Facial"])
+    writer.writerow(["Colaborador", "Data/Hora (Horário de Brasília)", "Endereço", "Latitude", "Longitude", "Distância Facial"])
     for r in registros:
+        horario_local = para_brasilia(r.data_hora)
         writer.writerow([
             r.colaborador.nome,
-            r.data_hora.strftime("%d/%m/%Y %H:%M:%S"),
+            horario_local.strftime("%d/%m/%Y %H:%M:%S"),
+            r.endereco or "",
             r.latitude,
             r.longitude,
             round(r.distancia_facial, 4) if r.distancia_facial is not None else "",
@@ -260,6 +355,7 @@ def exportar_csv():
 def init_db():
     """Cria as tabelas e um usuário gestor inicial. Rodar com: flask init-db"""
     db.create_all()
+    _garantir_coluna_endereco()
     email_gestor = os.environ.get("GESTOR_EMAIL", "gestor@empresa.com")
     if not Colaborador.query.filter_by(email=email_gestor).first():
         gestor = Colaborador(nome="Gestor", email=email_gestor, is_gestor=True)
@@ -271,8 +367,24 @@ def init_db():
         print("Gestor já existe.")
 
 
+# ---------------------------------------------------------------------------
+# Migração leve (sem Flask-Migrate): garante que colunas novas existam
+# em bancos já criados anteriormente (ex.: banco Postgres já em produção).
+# ---------------------------------------------------------------------------
+def _garantir_coluna_endereco():
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(db.engine)
+    colunas = [col["name"] for col in inspector.get_columns("registro_ponto")]
+    if "endereco" not in colunas:
+        with db.engine.connect() as conn:
+            conn.execute(text("ALTER TABLE registro_ponto ADD COLUMN endereco VARCHAR(255)"))
+            conn.commit()
+
+
 with app.app_context():
     db.create_all()
+    _garantir_coluna_endereco()
     email_gestor = os.environ.get("GESTOR_EMAIL", "gestor@empresa.com")
     if not Colaborador.query.filter_by(email=email_gestor).first():
         gestor = Colaborador(nome="Gestor", email=email_gestor, is_gestor=True)

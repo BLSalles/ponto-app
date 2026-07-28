@@ -7,3 +7,5 @@ numpy==1.26.4
 Pillow
 face-recognition-models==0.3.0
 dlib-bin
+tzdata
+requests==2.32.3

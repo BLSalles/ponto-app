@@ -1,31 +1,61 @@
 {% extends "base.html" %}
 {% block titulo %}Bater Ponto{% endblock %}
 {% block conteudo %}
-<div class="card">
-  <h2>Registrar Ponto</h2>
-  <p>Posicione seu rosto na câmera e clique em "Bater Ponto".</p>
+<div class="ponto-wrap">
 
-  <video id="video" autoplay playsinline width="320" height="240"></video>
-  <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+  <div class="ponto-clock-card">
+    <div class="ponto-clock-label">Horário de Brasília</div>
+    <div class="ponto-clock" id="relogio">--:--:--</div>
+    <div class="ponto-data" id="data-atual">—</div>
+  </div>
 
-  <p id="status-localizacao">Obtendo localização...</p>
-  <button id="btn-registrar" disabled>Bater Ponto</button>
-  <p id="resultado"></p>
+  <div class="card ponto-card">
+    <h2>Registrar Ponto</h2>
+    <p class="ponto-instrucao">Posicione seu rosto na câmera e clique em "Bater Ponto".</p>
+
+    <div class="camera-frame">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+    </div>
+
+    <div class="status-linha">
+      <span class="status-chip" id="chip-localizacao">
+        <span class="status-dot pendente"></span> Obtendo localização...
+      </span>
+    </div>
+
+    <button id="btn-registrar" class="btn-primario" disabled>Bater Ponto</button>
+    <p id="resultado" class="resultado-msg"></p>
+  </div>
 </div>
 
 <script>
+// Relógio ao vivo — sempre no horário de Brasília, independente do fuso do dispositivo
+function atualizarRelogio() {
+  const agora = new Date();
+  const opcoesHora = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+  const opcoesData = { timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' };
+  document.getElementById('relogio').textContent = new Intl.DateTimeFormat('pt-BR', opcoesHora).format(agora);
+  document.getElementById('data-atual').textContent = new Intl.DateTimeFormat('pt-BR', opcoesData).format(agora);
+}
+atualizarRelogio();
+setInterval(atualizarRelogio, 1000);
+
 let latitude = null;
 let longitude = null;
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const btnRegistrar = document.getElementById('btn-registrar');
-const statusLoc = document.getElementById('status-localizacao');
+const chipLocalizacao = document.getElementById('chip-localizacao');
 const resultado = document.getElementById('resultado');
 
 // Câmera
 navigator.mediaDevices.getUserMedia({ video: true })
   .then(stream => { video.srcObject = stream; })
-  .catch(() => { resultado.textContent = 'Não foi possível acessar a câmera.'; });
+  .catch(() => {
+    resultado.textContent = 'Não foi possível acessar a câmera.';
+    resultado.className = 'resultado-msg erro';
+  });
 
 // Geolocalização
 if (navigator.geolocation) {
@@ -33,15 +63,15 @@ if (navigator.geolocation) {
     pos => {
       latitude = pos.coords.latitude;
       longitude = pos.coords.longitude;
-      statusLoc.textContent = 'Localização obtida.';
+      chipLocalizacao.innerHTML = '<span class="status-dot ok"></span> Localização obtida';
       btnRegistrar.disabled = false;
     },
     () => {
-      statusLoc.textContent = 'Não foi possível obter a localização. Permita o acesso e recarregue a página.';
+      chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Não foi possível obter a localização';
     }
   );
 } else {
-  statusLoc.textContent = 'Geolocalização não suportada neste navegador.';
+  chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Geolocalização não suportada neste navegador';
 }
 
 btnRegistrar.addEventListener('click', () => {
@@ -50,6 +80,7 @@ btnRegistrar.addEventListener('click', () => {
   const foto = canvas.toDataURL('image/jpeg', 0.8);
 
   btnRegistrar.disabled = true;
+  resultado.className = 'resultado-msg';
   resultado.textContent = 'Registrando...';
 
   fetch('/api/registrar-ponto', {
@@ -60,10 +91,12 @@ btnRegistrar.addEventListener('click', () => {
     .then(r => r.json())
     .then(data => {
       resultado.textContent = data.mensagem;
+      resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
       btnRegistrar.disabled = false;
     })
     .catch(() => {
       resultado.textContent = 'Erro ao registrar o ponto.';
+      resultado.className = 'resultado-msg erro';
       btnRegistrar.disabled = false;
     });
 });

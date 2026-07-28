@@ -7,20 +7,32 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <header class="topo">
-    <h1>Controle de Ponto</h1>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <span class="topbar-logo">⏱</span>
+      <span>Controle de Ponto</span>
+    </div>
     {% if session.get('user_id') %}
-      <nav>
-        <span>Olá, {{ session.get('nome') }}</span>
-        {% if session.get('is_gestor') %}
-          <a href="{{ url_for('gestor_dashboard') }}">Painel do Gestor</a>
-        {% else %}
-          <a href="{{ url_for('ponto') }}">Bater Ponto</a>
-        {% endif %}
-        <a href="{{ url_for('logout') }}">Sair</a>
-      </nav>
+      <div class="topbar-user">
+        <div class="user-info">
+          <span class="user-avatar">{{ session.get('nome', '?')[0]|upper }}</span>
+          <span class="user-name">{{ session.get('nome') }}</span>
+        </div>
+        <a class="btn-sair" href="{{ url_for('logout') }}">Sair</a>
+      </div>
     {% endif %}
   </header>
+
+  {% if session.get('is_gestor') %}
+    <nav class="subnav">
+      <a class="subnav-link {% if request.endpoint == 'gestor_consulta' %}active{% endif %}" href="{{ url_for('gestor_consulta') }}">
+        <span class="subnav-icon">📊</span> Consulta
+      </a>
+      <a class="subnav-link {% if request.endpoint == 'gestor_cadastro' %}active{% endif %}" href="{{ url_for('gestor_cadastro') }}">
+        <span class="subnav-icon">➕</span> Cadastro
+      </a>
+    </nav>
+  {% endif %}
 
   <main class="conteudo">
     {% with mensagens = get_flashed_messages() %}
