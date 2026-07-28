@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block titulo %}Controle de Ponto{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <span class="topbar-logo">⏱</span>
+      <span>Controle de Ponto</span>
+    </div>
+    {% if session.get('user_id') %}
+      <div class="topbar-user">
+        <div class="user-info">
+          <span class="user-avatar">{{ session.get('nome', '?')[0]|upper }}</span>
+          <span class="user-name">{{ session.get('nome') }}</span>
+        </div>
+        <a class="btn-sair" href="{{ url_for('logout') }}">Sair</a>
+      </div>
+    {% endif %}
+  </header>
+
+  {% if session.get('is_gestor') %}
+    <nav class="subnav">
+      <a class="subnav-link {% if request.endpoint == 'gestor_consulta' %}active{% endif %}" href="{{ url_for('gestor_consulta') }}">
+        <span class="subnav-icon">📊</span> Consulta
+      </a>
+      <a class="subnav-link {% if request.endpoint == 'gestor_cadastro' %}active{% endif %}" href="{{ url_for('gestor_cadastro') }}">
+        <span class="subnav-icon">➕</span> Cadastro
+      </a>
+    </nav>
+  {% endif %}
+
+  <main class="conteudo">
+    {% with mensagens = get_flashed_messages() %}
+      {% if mensagens %}
+        <div class="flash">
+          {% for m in mensagens %}<p>{{ m }}</p>{% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block conteudo %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block titulo %}Consulta - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <span class="stat-valor">{{ total_colaboradores }}</span>
+    <span class="stat-label">Colaboradores ativos</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-valor">{{ registros_hoje }}</span>
+    <span class="stat-label">Registros hoje</span>
+  </div>
+  <div class="stat-card {% if sem_cadastro_facial %}stat-alerta{% endif %}">
+    <span class="stat-valor">{{ sem_cadastro_facial }}</span>
+    <span class="stat-label">Sem cadastro facial</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Colaboradores</h2>
+  </div>
+  <div class="lista-colaboradores">
+    {% for c in colaboradores %}
+      <div class="colaborador-item">
+        <span class="colaborador-avatar">{{ c.nome[0]|upper }}</span>
+        <div class="colaborador-info">
+          <span class="colaborador-nome">{{ c.nome }}</span>
+          <span class="colaborador-email">{{ c.email }}</span>
+        </div>
+        {% if not c.face_encoding %}
+          <span class="badge badge-alerta">Sem rosto cadastrado</span>
+        {% else %}
+          <span class="badge badge-ok">Ativo</span>
+        {% endif %}
+      </div>
+    {% else %}
+      <p class="vazio">Nenhum colaborador cadastrado ainda.</p>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Registros de Ponto</h2>
+    <a class="btn-secundario" href="{{ url_for('exportar_csv') }}" style="margin-top:0;">⬇ Exportar CSV</a>
+  </div>
+  <div class="tabela-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Colaborador</th>
+          <th>Data/Hora (Brasília)</th>
+          <th>Localização</th>
+          <th>Confiança facial</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in registros %}
+        <tr>
+          <td>{{ r.colaborador.nome }}</td>
+          <td>{{ r.data_hora | brasilia }}</td>
+          <td class="celula-localizacao">
+            {% if r.latitude and r.longitude %}
+              <a href="https://www.google.com/maps?q={{ r.latitude }},{{ r.longitude }}" target="_blank">
+                {% if r.endereco %}
+                  {{ r.endereco }}
+                {% else %}
+                  {{ "%.5f"|format(r.latitude) }}, {{ "%.5f"|format(r.longitude) }}
+                {% endif %}
+              </a>
+              {% if r.endereco %}
+                <span class="coordenadas-sub">{{ "%.5f"|format(r.latitude) }}, {{ "%.5f"|format(r.longitude) }}</span>
+              {% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>{{ "%.3f"|format(r.distancia_facial) if r.distancia_facial is not none else "—" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="vazio">Nenhum registro encontrado.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
