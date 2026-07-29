@@ -445,6 +445,43 @@ button:disabled { background: var(--cor-pendente); cursor: not-allowed; }
 }
 .lista-explicativa li { margin-bottom: 4px; }
 
+code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chaves-geradas {
+  margin-top: 16px;
+  padding: 14px;
+  background: #111827;
+  border-radius: var(--raio-pequeno);
+}
+
+.chaves-aviso {
+  margin: 0 0 10px;
+  color: #fbbf24;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chaves-geradas label {
+  color: #9ca3af;
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+
+.chaves-geradas input[type="text"] {
+  background: #1f2937;
+  border-color: #374151;
+  color: #d1fae5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  cursor: text;
+}
+
 .stat-card-link {
   text-decoration: none;
   cursor: pointer;

@@ -159,13 +159,66 @@ if (!('Notification' in window)) {
 
 btnLembrete.addEventListener('click', () => {
   Notification.requestPermission().then(permissao => {
-    if (permissao === 'granted') {
-      btnLembrete.textContent = '🔔 Lembretes ativados';
-      btnLembrete.disabled = true;
-      dispararNotificacao('Você será avisado se esquecer de bater o ponto.');
-    }
+    if (permissao !== 'granted') return;
+
+    btnLembrete.textContent = '🔔 Lembretes ativados';
+    btnLembrete.disabled = true;
+    dispararNotificacao('Você será avisado se esquecer de bater o ponto.');
+
+    // Também inscreve para Web Push de verdade (funciona mesmo com o app fechado).
+    inscreverPushReal();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Web Push real: entrega o lembrete mesmo com o app fechado, enviado pelo
+// servidor (agendador rodando no Flask). Só ativa se o gestor já tiver
+// configurado as chaves VAPID no servidor.
+// ---------------------------------------------------------------------------
+const PUSH_HABILITADO = {{ 'true' if push_habilitado else 'false' }};
+const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function inscreverPushReal() {
+  if (!PUSH_HABILITADO || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    return;
+  }
+
+  navigator.serviceWorker.ready
+    .then(reg => reg.pushManager.getSubscription().then(sub => sub || reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+    })))
+    .then(sub => {
+      if (!sub) return;
+      return fetch('/api/push-subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub),
+      });
+    })
+    .catch(() => {
+      // Se a inscrição falhar, os lembretes locais (enquanto a aba está aberta) continuam funcionando.
+    });
+}
+
+// Se o navegador já tinha permissão concedida em uma visita anterior, garante
+// que a inscrição push também já esteja ativa (sem precisar clicar de novo).
+if ('Notification' in window && Notification.permission === 'granted') {
+  btnLembrete.textContent = '🔔 Lembretes ativados';
+  btnLembrete.disabled = true;
+  inscreverPushReal();
+}
 
 function dispararNotificacao(texto) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;

@@ -2,11 +2,14 @@ import os
 import io
 import csv
 import base64
+import json
 import numpy as np
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from functools import wraps
+from pywebpush import webpush, WebPushException
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from flask import (
     Flask, render_template, request, redirect,
@@ -139,6 +142,29 @@ def obter_configuracao():
     return config
 
 
+class PushSubscription(db.Model):
+    """Inscrição de notificação push (Web Push) de um colaborador em um dispositivo/navegador."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    endpoint = db.Column(db.Text, nullable=False, unique=True)
+    p256dh = db.Column(db.String(255), nullable=False)
+    auth = db.Column(db.String(255), nullable=False)
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+
+    colaborador = db.relationship("Colaborador", backref="push_subscriptions")
+
+
+class UltimoLembretePush(db.Model):
+    """Controla quando foi o último push de lembrete enviado por colaborador/tipo,
+    para respeitar o intervalo configurado sem duplicar envios."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    tipo = db.Column(db.String(20), nullable=False)  # entrada | saida
+    enviado_em = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (db.UniqueConstraint("colaborador_id", "tipo", name="uniq_colaborador_tipo_lembrete"),)
+
+
 # ---------------------------------------------------------------------------
 # Helpers de autenticação
 # ---------------------------------------------------------------------------
@@ -252,11 +278,155 @@ def montar_resumo_diario(registros):
 
 
 # ---------------------------------------------------------------------------
+# Web Push (notificações reais, mesmo com o app fechado)
+# ---------------------------------------------------------------------------
+# As chaves são geradas uma única vez com "flask generate-vapid-keys" e salvas
+# como variáveis de ambiente no Render. Sem elas, o push fica desativado (o app
+# continua funcionando normalmente, só sem o lembrete de fundo).
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL", "contato@empresa.com")
+PUSH_HABILITADO = bool(VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY)
+
+
+def gerar_par_chaves_vapid():
+    """Gera um par de chaves VAPID novo (privada, pública) já em formato urlsafe-base64,
+    prontas para virarem variáveis de ambiente VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY."""
+    from py_vapid import Vapid02
+    from cryptography.hazmat.primitives import serialization
+
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    v = Vapid02()
+    v.generate_keys()
+
+    priv_value = v.private_key.private_numbers().private_value.to_bytes(32, "big")
+    pub_raw = v.public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    return _b64url(priv_value), _b64url(pub_raw)
+
+
+def enviar_push_colaborador(colaborador, titulo, corpo):
+    """Envia uma notificação Web Push para todos os dispositivos inscritos do colaborador.
+    Remove automaticamente inscrições que o navegador já invalidou (410/404)."""
+    if not PUSH_HABILITADO:
+        return
+
+    payload = json.dumps({"title": titulo, "body": corpo})
+    for sub in list(colaborador.push_subscriptions):
+        try:
+            webpush(
+                subscription_info={
+                    "endpoint": sub.endpoint,
+                    "keys": {"p256dh": sub.p256dh, "auth": sub.auth},
+                },
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
+            )
+        except WebPushException as ex:
+            status = getattr(ex.response, "status_code", None)
+            if status in (404, 410):
+                db.session.delete(sub)
+                db.session.commit()
+        except Exception:
+            # Nunca deixa uma falha de push derrubar o job do agendador.
+            pass
+
+
+def verificar_e_enviar_lembretes_push():
+    """Roda periodicamente (APScheduler): verifica quem está devendo bater ponto
+    e envia push respeitando o intervalo configurado pelo gestor."""
+    if not PUSH_HABILITADO:
+        return
+
+    with app.app_context():
+        config = obter_configuracao()
+        agora_str = agora_brasilia().strftime("%H:%M")
+        colaboradores = Colaborador.query.filter_by(is_gestor=False).all()
+
+        for colaborador in colaboradores:
+            if not colaborador.push_subscriptions:
+                continue
+
+            count = contar_registros_hoje(colaborador.id)
+            pendencia = None
+            if count == 0 and agora_str >= config.horario_entrada:
+                pendencia = "entrada"
+            elif count % 2 == 1 and agora_str >= config.horario_saida:
+                pendencia = "saida"
+
+            if not pendencia:
+                continue
+
+            ultimo = UltimoLembretePush.query.filter_by(
+                colaborador_id=colaborador.id, tipo=pendencia
+            ).first()
+
+            if ultimo:
+                minutos_desde_ultimo = (datetime.utcnow() - ultimo.enviado_em).total_seconds() / 60
+                if minutos_desde_ultimo < config.intervalo_lembrete_minutos:
+                    continue
+
+            texto = (
+                "Você ainda não bateu a ENTRADA hoje!"
+                if pendencia == "entrada"
+                else "Você ainda não bateu a SAÍDA hoje!"
+            )
+            enviar_push_colaborador(colaborador, "Lembrete de ponto", texto)
+
+            if ultimo:
+                ultimo.enviado_em = datetime.utcnow()
+            else:
+                db.session.add(UltimoLembretePush(
+                    colaborador_id=colaborador.id, tipo=pendencia, enviado_em=datetime.utcnow()
+                ))
+            db.session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Rotas - autenticação
 # ---------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index():
     return redirect(url_for("login"))
+
+
+@app.route("/api/push-subscribe", methods=["POST"])
+@login_required
+def push_subscribe():
+    """Recebe a inscrição de Web Push do navegador do colaborador e salva no banco."""
+    dados = request.get_json(silent=True) or {}
+    endpoint = dados.get("endpoint")
+    keys = dados.get("keys", {})
+    p256dh = keys.get("p256dh")
+    auth = keys.get("auth")
+
+    if not (endpoint and p256dh and auth):
+        return jsonify({"ok": False, "mensagem": "Dados de inscrição incompletos."}), 400
+
+    existente = PushSubscription.query.filter_by(endpoint=endpoint).first()
+    if existente:
+        existente.colaborador_id = session["user_id"]
+        existente.p256dh = p256dh
+        existente.auth = auth
+    else:
+        db.session.add(PushSubscription(
+            colaborador_id=session["user_id"], endpoint=endpoint, p256dh=p256dh, auth=auth
+        ))
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/healthz")
+def healthz():
+    """Endpoint leve para um pinger externo (ex.: cron-job.org, UptimeRobot) manter o
+    serviço acordado no plano gratuito do Render, o que é necessário para o agendador
+    de lembretes (APScheduler) continuar rodando."""
+    return jsonify({"status": "ok"})
 
 
 @app.route("/service-worker.js")
@@ -308,6 +478,8 @@ def ponto():
         horario_entrada=config.horario_entrada,
         horario_saida=config.horario_saida,
         intervalo_lembrete_minutos=config.intervalo_lembrete_minutos,
+        vapid_public_key=VAPID_PUBLIC_KEY or "",
+        push_habilitado=PUSH_HABILITADO,
     )
 
 
@@ -488,7 +660,23 @@ def gestor_cadastro():
 @gestor_required
 def gestor_configuracoes():
     config = obter_configuracao()
-    return render_template("gestor_configuracoes.html", config=config)
+    return render_template("gestor_configuracoes.html", config=config, push_habilitado=PUSH_HABILITADO)
+
+
+@app.route("/gestor/configuracoes/gerar-chaves-push", methods=["POST"])
+@gestor_required
+def gerar_chaves_push():
+    """Gera um novo par de chaves VAPID direto pela interface, sem precisar de terminal/shell.
+    As chaves são mostradas UMA VEZ na tela para o gestor copiar e colar no Render."""
+    chave_privada, chave_publica = gerar_par_chaves_vapid()
+    config = obter_configuracao()
+    return render_template(
+        "gestor_configuracoes.html",
+        config=config,
+        push_habilitado=PUSH_HABILITADO,
+        chave_privada_gerada=chave_privada,
+        chave_publica_gerada=chave_publica,
+    )
 
 
 @app.route("/gestor/configuracoes/salvar", methods=["POST"])
@@ -678,6 +866,20 @@ def init_db():
         print("Gestor já existe.")
 
 
+@app.cli.command("generate-vapid-keys")
+def generate_vapid_keys():
+    """Gera um par de chaves VAPID para o Web Push. Rodar UMA VEZ com: flask generate-vapid-keys
+    e copiar a saída para as variáveis de ambiente VAPID_PUBLIC_KEY e VAPID_PRIVATE_KEY no Render."""
+    chave_privada, chave_publica = gerar_par_chaves_vapid()
+
+    print("\nCopie estas duas variáveis para o Render (Settings → Environment):\n")
+    print(f"VAPID_PRIVATE_KEY={chave_privada}")
+    print(f"VAPID_PUBLIC_KEY={chave_publica}")
+    print("\nOpcional (aparece na mensagem enviada ao navegador como contato do remetente):")
+    print("VAPID_CONTACT_EMAIL=seu-email@empresa.com\n")
+    print("Depois de configurar, reinicie o serviço no Render para o push ser ativado.")
+
+
 # ---------------------------------------------------------------------------
 # Migração leve (sem Flask-Migrate): garante que colunas novas existam
 # em bancos já criados anteriormente (ex.: banco Postgres já em produção).
@@ -709,6 +911,25 @@ with app.app_context():
         gestor.set_senha(os.environ.get("GESTOR_SENHA", "mude-esta-senha"))
         db.session.add(gestor)
         db.session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Agendador de lembretes (Web Push) — roda dentro do próprio processo Flask.
+#
+# IMPORTANTE (plano gratuito do Render): o serviço "dorme" após ~15 min sem
+# receber requisições, e junto com ele esse agendador também para. Configure
+# um pinger externo gratuito (ex.: cron-job.org, UptimeRobot) para acessar
+# GET /healthz a cada 5-10 minutos e manter o serviço acordado.
+# ---------------------------------------------------------------------------
+if PUSH_HABILITADO and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+    scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
+    scheduler.add_job(verificar_e_enviar_lembretes_push, "interval", minutes=5, id="lembretes_push")
+    scheduler.start()
+elif not PUSH_HABILITADO:
+    print(
+        "[push] VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — lembretes por "
+        "notificação push desativados. Rode 'flask generate-vapid-keys' para gerar as chaves."
+    )
 
 
 if __name__ == "__main__":

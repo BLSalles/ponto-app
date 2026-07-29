@@ -2,6 +2,51 @@
 {% block titulo %}Configurações - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
+<div class="card {% if push_habilitado %}card-sucesso{% else %}card-aviso{% endif %}">
+  <div class="card-header">
+    <h2>{% if push_habilitado %}✅ Notificações push ativas{% else %}⚠️ Notificações push não configuradas{% endif %}</h2>
+  </div>
+  {% if push_habilitado %}
+    <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+      O servidor está configurado para enviar lembretes reais (mesmo com o app fechado) para quem
+      autorizar na tela "Bater Ponto". O agendador roda a cada 5 minutos.
+    </p>
+  {% else %}
+    <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+      Ainda não configurado. Sem isso, os colaboradores só recebem o lembrete enquanto estiverem
+      com a aba/app aberto — não funciona com o app fechado. Para ativar, gere as chaves abaixo
+      (não precisa de terminal nem shell):
+    </p>
+
+    <form method="POST" action="{{ url_for('gerar_chaves_push') }}">
+      <button type="submit" class="btn-primario">🔑 Gerar chaves VAPID</button>
+    </form>
+
+    {% if chave_privada_gerada %}
+      <div class="chaves-geradas">
+        <p class="chaves-aviso">
+          ⚠️ Copie estas duas linhas agora — elas <strong>não aparecerão de novo</strong> se você sair desta página.
+        </p>
+        <label>VAPID_PRIVATE_KEY</label>
+        <input type="text" readonly value="VAPID_PRIVATE_KEY={{ chave_privada_gerada }}" onclick="this.select()">
+        <label>VAPID_PUBLIC_KEY</label>
+        <input type="text" readonly value="VAPID_PUBLIC_KEY={{ chave_publica_gerada }}" onclick="this.select()">
+      </div>
+    {% endif %}
+
+    <ol class="lista-explicativa" style="padding-left:20px; margin-top:16px;">
+      <li>Clique em <strong>"🔑 Gerar chaves VAPID"</strong> acima.</li>
+      <li>Toque em cada campo para selecionar o texto e copie (Ctrl+C ou, no celular, segure e toque em "Copiar").</li>
+      <li>No Render, vá em <strong>Settings → Environment</strong> e adicione as duas variáveis (cada linha já vem no formato <code>NOME=valor</code>, é só colar em "Add from .env" se o Render oferecer essa opção, ou criar uma variável de cada vez).</li>
+      <li>Clique em <strong>Save Changes</strong> — o Render reinicia o serviço sozinho.</li>
+      <li><strong>Importante:</strong> no plano gratuito do Render, o serviço "dorme" quando ninguém acessa por
+        ~15 minutos, e junto com ele o agendador de lembretes também para. Configure um pinger gratuito
+        (ex.: <a href="https://cron-job.org" target="_blank">cron-job.org</a> ou UptimeRobot) para acessar
+        <code>{{ request.url_root }}healthz</code> a cada 5-10 minutos e manter o serviço acordado.</li>
+    </ol>
+  {% endif %}
+</div>
+
 <div class="card">
   <div class="card-header">
     <h2>Jornada e lembretes de ponto</h2>

@@ -9,3 +9,5 @@ face-recognition-models==0.3.0
 dlib-bin
 tzdata
 requests==2.32.3
+pywebpush==2.3.0
+APScheduler==3.11.3
