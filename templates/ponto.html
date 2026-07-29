@@ -34,6 +34,7 @@
     <p id="resultado" class="resultado-msg"></p>
 
     <button type="button" id="btn-lembrete" class="btn-secundario">🔔 Ativar lembrete no navegador</button>
+    <p id="aviso-ios" class="ponto-instrucao" style="display:none; color:#92400e; font-weight:500;"></p>
   </div>
 </div>
 
@@ -132,12 +133,28 @@ const HORARIO_SAIDA = "{{ horario_saida }}";
 const INTERVALO_LEMBRETE_MS = {{ intervalo_lembrete_minutos }} * 60 * 1000;
 
 const btnLembrete = document.getElementById('btn-lembrete');
+const avisoIOS = document.getElementById('aviso-ios');
 const bannerLembrete = document.getElementById('banner-lembrete');
 const bannerLembreteTexto = document.getElementById('banner-lembrete-texto');
 let proximoLembreteEm = 0; // timestamp (Date.now()) em que o próximo lembrete pode disparar
 
+const ehIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+const rodandoInstalado = window.navigator.standalone === true
+  || window.matchMedia('(display-mode: standalone)').matches;
+
 if (!('Notification' in window)) {
+  // iOS Safari não expõe a API de notificação em abas normais — só funciona
+  // quando o site é instalado na Tela de Início.
   btnLembrete.style.display = 'none';
+  if (ehIOS && !rodandoInstalado) {
+    avisoIOS.style.display = 'block';
+    avisoIOS.innerHTML = '📱 Para receber lembretes no iPhone: toque em <strong>Compartilhar</strong> (ícone de quadrado com seta) → <strong>Adicionar à Tela de Início</strong>. Depois abra o app pelo ícone criado (não pelo Safari).';
+  }
+} else if (ehIOS && !rodandoInstalado) {
+  // Tem a API mas está rodando dentro do Safari normal (não instalado) — no iOS
+  // isso normalmente não entrega notificações de forma confiável.
+  avisoIOS.style.display = 'block';
+  avisoIOS.innerHTML = '📱 Para os lembretes funcionarem de forma confiável no iPhone, adicione este app à Tela de Início: toque em <strong>Compartilhar</strong> → <strong>Adicionar à Tela de Início</strong> e abra por lá.';
 }
 
 btnLembrete.addEventListener('click', () => {
@@ -145,15 +162,27 @@ btnLembrete.addEventListener('click', () => {
     if (permissao === 'granted') {
       btnLembrete.textContent = '🔔 Lembretes ativados';
       btnLembrete.disabled = true;
-      new Notification('Lembretes ativados', {
-        body: 'Você será avisado se esquecer de bater o ponto (enquanto esta aba estiver aberta).'
-      });
+      dispararNotificacao('Você será avisado se esquecer de bater o ponto.');
     }
   });
 });
 
 function dispararNotificacao(texto) {
-  if ('Notification' in window && Notification.permission === 'granted') {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+  // Usa o service worker sempre que possível — é o único jeito que funciona no iOS,
+  // e também funciona normalmente no Android/desktop.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.ready.then(reg => {
+      reg.showNotification('Lembrete de ponto', {
+        body: texto,
+        icon: '/static/icons/icon-192.png',
+        badge: '/static/icons/icon-192.png',
+      });
+    }).catch(() => {
+      new Notification('Lembrete de ponto', { body: texto });
+    });
+  } else {
     new Notification('Lembrete de ponto', { body: texto });
   }
 }

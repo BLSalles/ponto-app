@@ -10,7 +10,7 @@ from functools import wraps
 
 from flask import (
     Flask, render_template, request, redirect,
-    url_for, session, flash, Response, jsonify
+    url_for, session, flash, Response, jsonify, send_from_directory
 )
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -257,6 +257,17 @@ def montar_resumo_diario(registros):
 @app.route("/", methods=["GET"])
 def index():
     return redirect(url_for("login"))
+
+
+@app.route("/service-worker.js")
+def service_worker():
+    """Serve o service worker a partir da raiz do site (não de /static/), para que
+    o escopo dele cubra o app inteiro — essencial para notificações no iOS."""
+    resposta = send_from_directory(
+        os.path.join(app.root_path, "static"), "service-worker.js", mimetype="application/javascript"
+    )
+    resposta.headers["Service-Worker-Allowed"] = "/"
+    return resposta
 
 
 @app.route("/login", methods=["GET", "POST"])
