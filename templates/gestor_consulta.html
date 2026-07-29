@@ -15,7 +15,35 @@
     <span class="stat-valor">{{ sem_cadastro_facial }}</span>
     <span class="stat-label">Sem cadastro facial</span>
   </div>
+  <a href="{{ url_for('gestor_ajustes') }}" class="stat-card stat-card-link {% if ajustes_pendentes %}stat-alerta{% endif %}">
+    <span class="stat-valor">{{ ajustes_pendentes }}</span>
+    <span class="stat-label">Ajustes pendentes</span>
+  </a>
 </div>
+
+{% if colaboradores_sem_registro_hoje %}
+<div class="card card-aviso">
+  <div class="card-header">
+    <h2>⚠️ Ainda não bateram ponto hoje</h2>
+  </div>
+  <div class="lista-colaboradores">
+    {% for c in colaboradores_sem_registro_hoje %}
+      <div class="colaborador-item">
+        <span class="colaborador-avatar">{{ c.nome[0]|upper }}</span>
+        <div class="colaborador-info">
+          <span class="colaborador-nome">{{ c.nome }}</span>
+          <span class="colaborador-email">{{ c.email }}</span>
+        </div>
+        <span class="badge badge-alerta">Sem registro hoje</span>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="card card-sucesso">
+  <p class="aviso-sucesso">✅ Todos os colaboradores já bateram ponto hoje.</p>
+</div>
+{% endif %}
 
 <div class="card">
   <div class="card-header">

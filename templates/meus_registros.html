@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block titulo %}Meus Registros{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Resumo por dia</h2>
+  </div>
+  {% if resumo_diario %}
+    <div class="lista-colaboradores">
+      {% for dia in resumo_diario %}
+        <div class="colaborador-item">
+          <div class="colaborador-info">
+            <span class="colaborador-nome">{{ dia.data.strftime('%d/%m/%Y') }}</span>
+            <span class="colaborador-email">
+              {{ dia.batidas | length }} batida{{ 's' if dia.batidas|length != 1 else '' }}
+              — total estimado: {{ dia.total_horas }}
+            </span>
+          </div>
+          {% if dia.incompleto %}
+            <span class="badge badge-alerta">Incompleto</span>
+          {% else %}
+            <span class="badge badge-ok">Completo</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="vazio">Nenhum registro encontrado ainda.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Histórico detalhado</h2>
+  </div>
+  <div class="tabela-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Data/Hora (Brasília)</th>
+          <th>Localização</th>
+          <th>Origem</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in registros %}
+        <tr>
+          <td>{{ r.data_hora | brasilia }}</td>
+          <td class="celula-localizacao">
+            {% if r.endereco %}
+              {{ r.endereco }}
+            {% elif r.latitude and r.longitude %}
+              {{ "%.5f"|format(r.latitude) }}, {{ "%.5f"|format(r.longitude) }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            {% if r.origem == 'ajuste_manual' %}
+              <span class="badge badge-alerta">Ajuste manual</span>
+            {% else %}
+              <span class="badge badge-ok">Facial</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3" class="vazio">Nenhum registro encontrado.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Esqueceu de bater o ponto?</h2>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    Solicite um ajuste informando a data, o tipo de marcação e o horário correto. Seu gestor vai revisar e aprovar ou recusar.
+  </p>
+  <form method="POST" action="{{ url_for('solicitar_ajuste') }}">
+    <div class="form-grid">
+      <div class="form-campo">
+        <label>Data</label>
+        <input type="date" name="data_referencia" required max="{{ hoje.strftime('%Y-%m-%d') }}">
+      </div>
+      <div class="form-campo">
+        <label>Tipo</label>
+        <select name="tipo" required>
+          <option value="entrada">Entrada</option>
+          <option value="saida">Saída</option>
+        </select>
+      </div>
+      <div class="form-campo">
+        <label>Horário correto</label>
+        <input type="time" name="horario_solicitado" required>
+      </div>
+    </div>
+    <label>Motivo</label>
+    <textarea name="motivo" rows="3" required placeholder="Ex: esqueci de bater o ponto de saída ontem."></textarea>
+    <button type="submit" class="btn-primario">Enviar solicitação</button>
+  </form>
+</div>
+
+{% if solicitacoes %}
+<div class="card">
+  <div class="card-header">
+    <h2>Minhas solicitações</h2>
+  </div>
+  <div class="lista-colaboradores">
+    {% for s in solicitacoes %}
+      <div class="colaborador-item">
+        <div class="colaborador-info">
+          <span class="colaborador-nome">{{ s.data_referencia.strftime('%d/%m/%Y') }} — {{ 'Entrada' if s.tipo == 'entrada' else 'Saída' }} às {{ s.horario_solicitado }}</span>
+          <span class="colaborador-email">{{ s.motivo }}</span>
+          {% if s.resposta_gestor %}
+            <span class="colaborador-email">Resposta do gestor: {{ s.resposta_gestor }}</span>
+          {% endif %}
+        </div>
+        {% if s.status == 'pendente' %}
+          <span class="badge badge-alerta">Pendente</span>
+        {% elif s.status == 'aprovado' %}
+          <span class="badge badge-ok">Aprovado</span>
+        {% else %}
+          <span class="badge badge-erro">Recusado</span>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

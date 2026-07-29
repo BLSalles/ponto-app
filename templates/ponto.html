@@ -9,6 +9,12 @@
     <div class="ponto-data" id="data-atual">—</div>
   </div>
 
+  <div class="card card-aviso" id="banner-lembrete" style="display:none; width:100%; text-align:center;">
+    <p style="margin:0; color:#92400e; font-weight:600; font-size:14px;">
+      ⏰ Você ainda não bateu o ponto hoje!
+    </p>
+  </div>
+
   <div class="card ponto-card">
     <h2>Registrar Ponto</h2>
     <p class="ponto-instrucao">Posicione seu rosto na câmera e clique em "Bater Ponto".</p>
@@ -26,6 +32,8 @@
 
     <button id="btn-registrar" class="btn-primario" disabled>Bater Ponto</button>
     <p id="resultado" class="resultado-msg"></p>
+
+    <button type="button" id="btn-lembrete" class="btn-secundario">🔔 Ativar lembrete no navegador</button>
   </div>
 </div>
 
@@ -74,6 +82,8 @@ if (navigator.geolocation) {
   chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Geolocalização não suportada neste navegador';
 }
 
+let registrouHoje = {{ 'true' if tem_registro_hoje else 'false' }};
+
 btnRegistrar.addEventListener('click', () => {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -93,6 +103,10 @@ btnRegistrar.addEventListener('click', () => {
       resultado.textContent = data.mensagem;
       resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
       btnRegistrar.disabled = false;
+      if (data.ok) {
+        registrouHoje = true;
+        document.getElementById('banner-lembrete').style.display = 'none';
+      }
     })
     .catch(() => {
       resultado.textContent = 'Erro ao registrar o ponto.';
@@ -100,5 +114,52 @@ btnRegistrar.addEventListener('click', () => {
       btnRegistrar.disabled = false;
     });
 });
+
+// ---------------------------------------------------------------------------
+// Lembrete simples: aviso na tela + notificação do navegador (enquanto a aba
+// estiver aberta). Não requer servidor de push; funciona só localmente.
+// ---------------------------------------------------------------------------
+const LEMBRETE_HORA = "{{ lembrete_hora }}"; // ex: "09:00"
+const btnLembrete = document.getElementById('btn-lembrete');
+const bannerLembrete = document.getElementById('banner-lembrete');
+let notificacaoJaEnviada = false;
+
+if (!('Notification' in window)) {
+  btnLembrete.style.display = 'none';
+}
+
+btnLembrete.addEventListener('click', () => {
+  Notification.requestPermission().then(permissao => {
+    if (permissao === 'granted') {
+      btnLembrete.textContent = '🔔 Lembretes ativados';
+      btnLembrete.disabled = true;
+      new Notification('Lembretes ativados', {
+        body: 'Você será avisado se esquecer de bater o ponto (enquanto esta aba estiver aberta).'
+      });
+    }
+  });
+});
+
+function verificarLembrete() {
+  if (registrouHoje) return;
+
+  const agora = new Date();
+  const horaAtualStr = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false
+  }).format(agora);
+
+  if (horaAtualStr >= LEMBRETE_HORA) {
+    bannerLembrete.style.display = 'block';
+
+    if (!notificacaoJaEnviada && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('Lembrete de ponto', {
+        body: 'Você ainda não bateu o ponto hoje. Não esqueça!'
+      });
+      notificacaoJaEnviada = true;
+    }
+  }
+}
+verificarLembrete();
+setInterval(verificarLembrete, 60000);
 </script>
 {% endblock %}

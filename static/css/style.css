@@ -149,6 +149,21 @@ html, body {
 
 .subnav-icon { font-size: 15px; }
 
+.subnav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--cor-erro);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 4px;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Layout geral                                                            */
 /* ---------------------------------------------------------------------- */
@@ -246,23 +261,34 @@ label {
 
 input[type="text"],
 input[type="email"],
-input[type="password"] {
+input[type="password"],
+input[type="date"],
+input[type="time"],
+select,
+textarea {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--cor-borda);
   border-radius: var(--raio-pequeno);
   font-size: 14px;
+  font-family: inherit;
   background: #fafafa;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 input[type="text"]:focus,
 input[type="email"]:focus,
-input[type="password"]:focus {
+input[type="password"]:focus,
+input[type="date"]:focus,
+input[type="time"]:focus,
+select:focus,
+textarea:focus {
   outline: none;
   border-color: var(--cor-primaria);
   background: white;
 }
+
+textarea { resize: vertical; margin-top: 4px; }
 
 .form-grid {
   display: grid;
@@ -387,6 +413,79 @@ button:disabled { background: var(--cor-pendente); cursor: not-allowed; }
 }
 .badge-ok { background: var(--cor-sucesso-fundo); color: #166534; }
 .badge-alerta { background: var(--cor-alerta-fundo); color: #92400e; }
+.badge-erro { background: var(--cor-erro-fundo); color: #991b1b; }
+
+/* ---------------------------------------------------------------------- */
+/* Cards de aviso / sucesso                                                */
+/* ---------------------------------------------------------------------- */
+.card-aviso {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.card-sucesso {
+  background: var(--cor-sucesso-fundo);
+  border-color: #bbf7d0;
+}
+
+.aviso-sucesso {
+  margin: 0;
+  color: #166534;
+  font-weight: 600;
+  font-size: 14px;
+  text-align: center;
+}
+
+.stat-card-link {
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+.stat-card-link:hover {
+  box-shadow: var(--sombra-elevada);
+  transform: translateY(-1px);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Solicitações de ajuste (visão do gestor)                                */
+/* ---------------------------------------------------------------------- */
+.ajuste-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--cor-borda);
+}
+.ajuste-item:last-child { border-bottom: none; }
+
+.ajuste-info { flex: 1 1 220px; min-width: 200px; }
+
+.ajuste-motivo {
+  font-size: 13px;
+  color: var(--cor-texto-suave);
+  margin: 6px 0 0;
+}
+
+.ajuste-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 200px;
+  min-width: 180px;
+}
+
+.ajuste-form input[type="text"] { font-size: 13px; }
+
+.ajuste-botoes button {
+  width: 100%;
+  margin-top: 0;
+}
+
+.btn-aprovar { background: var(--cor-sucesso); }
+.btn-aprovar:hover { background: #15803d; }
+.btn-recusar { color: var(--cor-erro); background: var(--cor-erro-fundo); }
+.btn-recusar:hover { background: #fecaca; }
 
 /* ---------------------------------------------------------------------- */
 /* Lista de colaboradores                                                  */

@@ -64,6 +64,14 @@ def filtro_brasilia(dt, fmt="%d/%m/%Y %H:%M:%S"):
     return dt_local.strftime(fmt) if dt_local else "—"
 
 
+@app.context_processor
+def injetar_contexto_navegacao():
+    """Disponibiliza o número de ajustes pendentes para o badge do menu do gestor em qualquer página."""
+    if session.get("is_gestor"):
+        return {"ajustes_pendentes_nav": SolicitacaoAjuste.query.filter_by(status="pendente").count()}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Modelos
 # ---------------------------------------------------------------------------
@@ -92,8 +100,25 @@ class RegistroPonto(db.Model):
     endereco = db.Column(db.String(255), nullable=True)  # endereço legível obtido por geocodificação reversa
     distancia_facial = db.Column(db.Float, nullable=True)  # quão próximo do rosto cadastrado
     tipo = db.Column(db.String(20), default="entrada")  # entrada / saida (opcional)
+    origem = db.Column(db.String(20), default="facial")  # facial | ajuste_manual
 
     colaborador = db.relationship("Colaborador", backref="registros")
+
+
+class SolicitacaoAjuste(db.Model):
+    """Solicitação do colaborador para corrigir um ponto esquecido, sujeita à aprovação do gestor."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    data_referencia = db.Column(db.Date, nullable=False)  # dia que precisa do ajuste
+    tipo = db.Column(db.String(20), nullable=False)  # entrada / saida
+    horario_solicitado = db.Column(db.String(5), nullable=False)  # "08:00"
+    motivo = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), default="pendente")  # pendente | aprovado | recusado
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+    respondido_em = db.Column(db.DateTime, nullable=True)
+    resposta_gestor = db.Column(db.Text, nullable=True)
+
+    colaborador = db.relationship("Colaborador", backref="solicitacoes_ajuste")
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +183,51 @@ def obter_endereco(latitude, longitude):
         return None
 
 
+# Horário (Brasília) a partir do qual o colaborador recebe o lembrete de bater ponto.
+LEMBRETE_HORA = os.environ.get("LEMBRETE_HORA", "09:00")
+
+
+def colaborador_tem_registro_hoje(colaborador_id):
+    """Verifica se o colaborador já bateu ao menos um ponto hoje (horário de Brasília)."""
+    hoje = agora_brasilia().date()
+    registros_recentes = (
+        RegistroPonto.query
+        .filter_by(colaborador_id=colaborador_id)
+        .order_by(RegistroPonto.data_hora.desc())
+        .limit(10)
+        .all()
+    )
+    return any(para_brasilia(r.data_hora).date() == hoje for r in registros_recentes)
+
+
+def montar_resumo_diario(registros):
+    """Agrupa registros por dia (Brasília) e estima horas trabalhadas pareando os horários
+    em ordem (1º=entrada, 2º=saída, 3º=entrada...). Sinaliza dias com número ímpar de batidas."""
+    from collections import defaultdict
+    import datetime as _dt
+
+    por_dia = defaultdict(list)
+    for r in registros:
+        dt_local = para_brasilia(r.data_hora)
+        por_dia[dt_local.date()].append(dt_local)
+
+    resumo = []
+    for dia, horarios in sorted(por_dia.items(), reverse=True):
+        horarios = sorted(horarios)
+        total_segundos = 0
+        for i in range(0, len(horarios) - 1, 2):
+            total_segundos += (horarios[i + 1] - horarios[i]).total_seconds()
+        horas = int(total_segundos // 3600)
+        minutos = int((total_segundos % 3600) // 60)
+        resumo.append({
+            "data": dia,
+            "batidas": horarios,
+            "total_horas": f"{horas:02d}:{minutos:02d}",
+            "incompleto": len(horarios) % 2 != 0,
+        })
+    return resumo
+
+
 # ---------------------------------------------------------------------------
 # Rotas - autenticação
 # ---------------------------------------------------------------------------
@@ -195,7 +265,13 @@ def logout():
 @app.route("/ponto", methods=["GET"])
 @login_required
 def ponto():
-    return render_template("ponto.html", nome=session.get("nome"))
+    tem_registro_hoje = colaborador_tem_registro_hoje(session["user_id"])
+    return render_template(
+        "ponto.html",
+        nome=session.get("nome"),
+        tem_registro_hoje=tem_registro_hoje,
+        lembrete_hora=LEMBRETE_HORA,
+    )
 
 
 @app.route("/api/registrar-ponto", methods=["POST"])
@@ -236,6 +312,7 @@ def registrar_ponto():
         longitude=longitude,
         endereco=endereco,
         distancia_facial=float(distancia),
+        origem="facial",
     )
     db.session.add(registro)
     db.session.commit()
@@ -251,6 +328,67 @@ def registrar_ponto():
         "data": horario_local.strftime("%d/%m/%Y"),
         "endereco": endereco,
     })
+
+
+@app.route("/meus-registros", methods=["GET"])
+@login_required
+def meus_registros():
+    user = Colaborador.query.get(session["user_id"])
+    registros = (
+        RegistroPonto.query
+        .filter_by(colaborador_id=user.id)
+        .order_by(RegistroPonto.data_hora.desc())
+        .limit(200)
+        .all()
+    )
+    resumo_diario = montar_resumo_diario(registros)
+
+    solicitacoes = (
+        SolicitacaoAjuste.query
+        .filter_by(colaborador_id=user.id)
+        .order_by(SolicitacaoAjuste.criado_em.desc())
+        .limit(30)
+        .all()
+    )
+
+    return render_template(
+        "meus_registros.html",
+        registros=registros,
+        resumo_diario=resumo_diario,
+        solicitacoes=solicitacoes,
+        hoje=agora_brasilia().date(),
+    )
+
+
+@app.route("/meus-registros/solicitar-ajuste", methods=["POST"])
+@login_required
+def solicitar_ajuste():
+    data_referencia_str = request.form.get("data_referencia")
+    tipo = request.form.get("tipo")
+    horario_solicitado = request.form.get("horario_solicitado")
+    motivo = request.form.get("motivo", "").strip()
+
+    if not (data_referencia_str and tipo and horario_solicitado and motivo):
+        flash("Preencha todos os campos da solicitação de ajuste.")
+        return redirect(url_for("meus_registros"))
+
+    try:
+        data_referencia = datetime.strptime(data_referencia_str, "%Y-%m-%d").date()
+    except ValueError:
+        flash("Data inválida.")
+        return redirect(url_for("meus_registros"))
+
+    solicitacao = SolicitacaoAjuste(
+        colaborador_id=session["user_id"],
+        data_referencia=data_referencia,
+        tipo=tipo,
+        horario_solicitado=horario_solicitado,
+        motivo=motivo,
+    )
+    db.session.add(solicitacao)
+    db.session.commit()
+    flash("Solicitação de ajuste enviada. Aguarde a aprovação do gestor.")
+    return redirect(url_for("meus_registros"))
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +415,12 @@ def gestor_consulta():
     total_colaboradores = len(colaboradores)
     sem_cadastro_facial = sum(1 for c in colaboradores if not c.face_encoding)
 
+    colaboradores_sem_registro_hoje = [
+        c for c in colaboradores if not colaborador_tem_registro_hoje(c.id)
+    ]
+
+    ajustes_pendentes = SolicitacaoAjuste.query.filter_by(status="pendente").count()
+
     return render_template(
         "gestor_consulta.html",
         registros=registros,
@@ -284,6 +428,8 @@ def gestor_consulta():
         registros_hoje=registros_hoje,
         total_colaboradores=total_colaboradores,
         sem_cadastro_facial=sem_cadastro_facial,
+        colaboradores_sem_registro_hoje=colaboradores_sem_registro_hoje,
+        ajustes_pendentes=ajustes_pendentes,
     )
 
 
@@ -349,13 +495,90 @@ def exportar_csv():
 
 
 # ---------------------------------------------------------------------------
+# Rotas - gestor: solicitações de ajuste de ponto
+# ---------------------------------------------------------------------------
+@app.route("/gestor/ajustes", methods=["GET"])
+@gestor_required
+def gestor_ajustes():
+    pendentes = (
+        SolicitacaoAjuste.query
+        .filter_by(status="pendente")
+        .order_by(SolicitacaoAjuste.criado_em.asc())
+        .all()
+    )
+    historico = (
+        SolicitacaoAjuste.query
+        .filter(SolicitacaoAjuste.status != "pendente")
+        .order_by(SolicitacaoAjuste.respondido_em.desc())
+        .limit(50)
+        .all()
+    )
+    return render_template("gestor_ajustes.html", pendentes=pendentes, historico=historico)
+
+
+@app.route("/gestor/ajustes/<int:ajuste_id>/aprovar", methods=["POST"])
+@gestor_required
+def aprovar_ajuste(ajuste_id):
+    solicitacao = SolicitacaoAjuste.query.get_or_404(ajuste_id)
+
+    if solicitacao.status != "pendente":
+        flash("Esta solicitação já foi respondida.")
+        return redirect(url_for("gestor_ajustes"))
+
+    try:
+        hora, minuto = (int(p) for p in solicitacao.horario_solicitado.split(":"))
+        dt_local = datetime.combine(solicitacao.data_referencia, datetime.min.time()).replace(
+            hour=hora, minute=minuto, tzinfo=TZ_BRASILIA
+        )
+        dt_utc_naive = dt_local.astimezone(TZ_UTC).replace(tzinfo=None)
+    except Exception:
+        flash("Não foi possível interpretar o horário solicitado.")
+        return redirect(url_for("gestor_ajustes"))
+
+    registro = RegistroPonto(
+        colaborador_id=solicitacao.colaborador_id,
+        data_hora=dt_utc_naive,
+        tipo=solicitacao.tipo,
+        endereco="Ajuste manual aprovado pelo gestor",
+        origem="ajuste_manual",
+    )
+    db.session.add(registro)
+
+    solicitacao.status = "aprovado"
+    solicitacao.respondido_em = datetime.utcnow()
+    solicitacao.resposta_gestor = request.form.get("resposta", "").strip()
+    db.session.commit()
+
+    flash(f"Ajuste aprovado para {solicitacao.colaborador.nome}.")
+    return redirect(url_for("gestor_ajustes"))
+
+
+@app.route("/gestor/ajustes/<int:ajuste_id>/recusar", methods=["POST"])
+@gestor_required
+def recusar_ajuste(ajuste_id):
+    solicitacao = SolicitacaoAjuste.query.get_or_404(ajuste_id)
+
+    if solicitacao.status != "pendente":
+        flash("Esta solicitação já foi respondida.")
+        return redirect(url_for("gestor_ajustes"))
+
+    solicitacao.status = "recusado"
+    solicitacao.respondido_em = datetime.utcnow()
+    solicitacao.resposta_gestor = request.form.get("resposta", "").strip()
+    db.session.commit()
+
+    flash(f"Ajuste recusado para {solicitacao.colaborador.nome}.")
+    return redirect(url_for("gestor_ajustes"))
+
+
+# ---------------------------------------------------------------------------
 # Inicialização / seed do primeiro gestor
 # ---------------------------------------------------------------------------
 @app.cli.command("init-db")
 def init_db():
     """Cria as tabelas e um usuário gestor inicial. Rodar com: flask init-db"""
     db.create_all()
-    _garantir_coluna_endereco()
+    _garantir_colunas_novas()
     email_gestor = os.environ.get("GESTOR_EMAIL", "gestor@empresa.com")
     if not Colaborador.query.filter_by(email=email_gestor).first():
         gestor = Colaborador(nome="Gestor", email=email_gestor, is_gestor=True)
@@ -371,20 +594,27 @@ def init_db():
 # Migração leve (sem Flask-Migrate): garante que colunas novas existam
 # em bancos já criados anteriormente (ex.: banco Postgres já em produção).
 # ---------------------------------------------------------------------------
-def _garantir_coluna_endereco():
+def _garantir_colunas_novas():
     from sqlalchemy import inspect, text
 
     inspector = inspect(db.engine)
     colunas = [col["name"] for col in inspector.get_columns("registro_ponto")]
+    comandos = []
     if "endereco" not in colunas:
+        comandos.append("ALTER TABLE registro_ponto ADD COLUMN endereco VARCHAR(255)")
+    if "origem" not in colunas:
+        comandos.append("ALTER TABLE registro_ponto ADD COLUMN origem VARCHAR(20)")
+
+    if comandos:
         with db.engine.connect() as conn:
-            conn.execute(text("ALTER TABLE registro_ponto ADD COLUMN endereco VARCHAR(255)"))
+            for comando in comandos:
+                conn.execute(text(comando))
             conn.commit()
 
 
 with app.app_context():
     db.create_all()
-    _garantir_coluna_endereco()
+    _garantir_colunas_novas()
     email_gestor = os.environ.get("GESTOR_EMAIL", "gestor@empresa.com")
     if not Colaborador.query.filter_by(email=email_gestor).first():
         gestor = Colaborador(nome="Gestor", email=email_gestor, is_gestor=True)

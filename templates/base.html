@@ -31,6 +31,21 @@
       <a class="subnav-link {% if request.endpoint == 'gestor_cadastro' %}active{% endif %}" href="{{ url_for('gestor_cadastro') }}">
         <span class="subnav-icon">➕</span> Cadastro
       </a>
+      <a class="subnav-link {% if request.endpoint == 'gestor_ajustes' %}active{% endif %}" href="{{ url_for('gestor_ajustes') }}">
+        <span class="subnav-icon">🛠️</span> Ajustes
+        {% if ajustes_pendentes_nav %}
+          <span class="subnav-badge">{{ ajustes_pendentes_nav }}</span>
+        {% endif %}
+      </a>
+    </nav>
+  {% elif session.get('user_id') %}
+    <nav class="subnav">
+      <a class="subnav-link {% if request.endpoint == 'ponto' %}active{% endif %}" href="{{ url_for('ponto') }}">
+        <span class="subnav-icon">⏱</span> Bater Ponto
+      </a>
+      <a class="subnav-link {% if request.endpoint == 'meus_registros' %}active{% endif %}" href="{{ url_for('meus_registros') }}">
+        <span class="subnav-icon">📋</span> Meus Registros
+      </a>
     </nav>
   {% endif %}
 
