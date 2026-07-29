@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block titulo %}Configurações - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Jornada e lembretes de ponto</h2>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    Defina o horário de entrada e saída padrão da empresa. Se o colaborador não bater o ponto
+    correspondente após esse horário, ele recebe um lembrete no navegador, repetido a cada
+    intervalo configurado, até bater o ponto certo.
+  </p>
+
+  <form method="POST" action="{{ url_for('salvar_configuracoes') }}">
+    <div class="form-grid">
+      <div class="form-campo">
+        <label>Horário de entrada</label>
+        <input type="time" name="horario_entrada" value="{{ config.horario_entrada }}" required>
+      </div>
+      <div class="form-campo">
+        <label>Horário de saída</label>
+        <input type="time" name="horario_saida" value="{{ config.horario_saida }}" required>
+      </div>
+      <div class="form-campo">
+        <label>Repetir lembrete a cada (minutos)</label>
+        <input type="number" name="intervalo_lembrete_minutos" min="5" max="240" value="{{ config.intervalo_lembrete_minutos }}" required>
+      </div>
+    </div>
+    <button type="submit" class="btn-primario">Salvar configurações</button>
+  </form>
+</div>
+
+<div class="card card-aviso">
+  <div class="card-header">
+    <h2>Como funciona</h2>
+  </div>
+  <ul class="lista-explicativa">
+    <li>Após <strong>{{ config.horario_entrada }}</strong>, se o colaborador ainda não tiver batido a <strong>entrada</strong>, ele recebe um lembrete a cada <strong>{{ config.intervalo_lembrete_minutos }} minutos</strong>.</li>
+    <li>Após <strong>{{ config.horario_saida }}</strong>, se o colaborador já entrou mas ainda não bateu a <strong>saída</strong>, ele também recebe lembretes no mesmo intervalo.</li>
+    <li>O lembrete é uma notificação do navegador — o colaborador precisa autorizar uma vez na tela "Bater Ponto" e manter a aba aberta.</li>
+    <li>Assim que o colaborador registra o ponto correspondente, os lembretes daquele tipo param automaticamente.</li>
+  </ul>
+</div>
+
+{% endblock %}

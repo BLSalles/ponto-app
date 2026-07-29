@@ -436,6 +436,15 @@ button:disabled { background: var(--cor-pendente); cursor: not-allowed; }
   text-align: center;
 }
 
+.lista-explicativa {
+  margin: 0;
+  padding-left: 20px;
+  color: #78350f;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.lista-explicativa li { margin-bottom: 4px; }
+
 .stat-card-link {
   text-decoration: none;
   cursor: pointer;

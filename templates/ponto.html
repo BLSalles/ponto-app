@@ -10,7 +10,7 @@
   </div>
 
   <div class="card card-aviso" id="banner-lembrete" style="display:none; width:100%; text-align:center;">
-    <p style="margin:0; color:#92400e; font-weight:600; font-size:14px;">
+    <p style="margin:0; color:#92400e; font-weight:600; font-size:14px;" id="banner-lembrete-texto">
       ⏰ Você ainda não bateu o ponto hoje!
     </p>
   </div>
@@ -82,7 +82,7 @@ if (navigator.geolocation) {
   chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Geolocalização não suportada neste navegador';
 }
 
-let registrouHoje = {{ 'true' if tem_registro_hoje else 'false' }};
+let registrosHojeCount = {{ registros_hoje_count }};
 
 btnRegistrar.addEventListener('click', () => {
   const ctx = canvas.getContext('2d');
@@ -104,8 +104,9 @@ btnRegistrar.addEventListener('click', () => {
       resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
       btnRegistrar.disabled = false;
       if (data.ok) {
-        registrouHoje = true;
-        document.getElementById('banner-lembrete').style.display = 'none';
+        registrosHojeCount = data.registros_hoje_count;
+        proximoLembreteEm = 0; // permite lembrete imediato de novo se a próxima pendência já valer a pena
+        verificarLembrete();
       }
     })
     .catch(() => {
@@ -118,11 +119,22 @@ btnRegistrar.addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // Lembrete simples: aviso na tela + notificação do navegador (enquanto a aba
 // estiver aberta). Não requer servidor de push; funciona só localmente.
+//
+// Regra definida pelo gestor em /gestor/configuracoes:
+// - Depois do horário de ENTRADA, se ainda não bateu nenhum ponto hoje, lembra
+//   a cada X minutos.
+// - Depois do horário de SAÍDA, se já entrou mas não bateu a saída (nº ímpar
+//   de batidas hoje), também lembra a cada X minutos.
+// - Assim que a pendência é resolvida, os lembretes daquele tipo param.
 // ---------------------------------------------------------------------------
-const LEMBRETE_HORA = "{{ lembrete_hora }}"; // ex: "09:00"
+const HORARIO_ENTRADA = "{{ horario_entrada }}";
+const HORARIO_SAIDA = "{{ horario_saida }}";
+const INTERVALO_LEMBRETE_MS = {{ intervalo_lembrete_minutos }} * 60 * 1000;
+
 const btnLembrete = document.getElementById('btn-lembrete');
 const bannerLembrete = document.getElementById('banner-lembrete');
-let notificacaoJaEnviada = false;
+const bannerLembreteTexto = document.getElementById('banner-lembrete-texto');
+let proximoLembreteEm = 0; // timestamp (Date.now()) em que o próximo lembrete pode disparar
 
 if (!('Notification' in window)) {
   btnLembrete.style.display = 'none';
@@ -140,23 +152,41 @@ btnLembrete.addEventListener('click', () => {
   });
 });
 
-function verificarLembrete() {
-  if (registrouHoje) return;
+function dispararNotificacao(texto) {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification('Lembrete de ponto', { body: texto });
+  }
+}
 
+function verificarLembrete() {
   const agora = new Date();
   const horaAtualStr = new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false
   }).format(agora);
 
-  if (horaAtualStr >= LEMBRETE_HORA) {
-    bannerLembrete.style.display = 'block';
+  let pendencia = null; // 'entrada' | 'saida' | null
 
-    if (!notificacaoJaEnviada && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification('Lembrete de ponto', {
-        body: 'Você ainda não bateu o ponto hoje. Não esqueça!'
-      });
-      notificacaoJaEnviada = true;
-    }
+  if (registrosHojeCount === 0 && horaAtualStr >= HORARIO_ENTRADA) {
+    pendencia = 'entrada';
+  } else if (registrosHojeCount % 2 === 1 && horaAtualStr >= HORARIO_SAIDA) {
+    pendencia = 'saida';
+  }
+
+  if (!pendencia) {
+    bannerLembrete.style.display = 'none';
+    return;
+  }
+
+  const texto = pendencia === 'entrada'
+    ? '⏰ Você ainda não bateu a ENTRADA hoje!'
+    : '⏰ Você ainda não bateu a SAÍDA hoje!';
+
+  bannerLembreteTexto.textContent = texto;
+  bannerLembrete.style.display = 'block';
+
+  if (Date.now() >= proximoLembreteEm) {
+    dispararNotificacao(texto.replace('⏰ ', ''));
+    proximoLembreteEm = Date.now() + INTERVALO_LEMBRETE_MS;
   }
 }
 verificarLembrete();

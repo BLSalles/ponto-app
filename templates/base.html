@@ -37,6 +37,9 @@
           <span class="subnav-badge">{{ ajustes_pendentes_nav }}</span>
         {% endif %}
       </a>
+      <a class="subnav-link {% if request.endpoint == 'gestor_configuracoes' %}active{% endif %}" href="{{ url_for('gestor_configuracoes') }}">
+        <span class="subnav-icon">⚙️</span> Configurações
+      </a>
     </nav>
   {% elif session.get('user_id') %}
     <nav class="subnav">

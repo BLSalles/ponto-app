@@ -121,6 +121,24 @@ class SolicitacaoAjuste(db.Model):
     colaborador = db.relationship("Colaborador", backref="solicitacoes_ajuste")
 
 
+class ConfiguracaoJornada(db.Model):
+    """Configuração única (definida pelo gestor) da jornada padrão e do lembrete de ponto."""
+    id = db.Column(db.Integer, primary_key=True)
+    horario_entrada = db.Column(db.String(5), default="08:00")
+    horario_saida = db.Column(db.String(5), default="18:00")
+    intervalo_lembrete_minutos = db.Column(db.Integer, default=60)
+
+
+def obter_configuracao():
+    """Devolve a configuração de jornada (cria uma com valores padrão se ainda não existir)."""
+    config = ConfiguracaoJornada.query.first()
+    if not config:
+        config = ConfiguracaoJornada()
+        db.session.add(config)
+        db.session.commit()
+    return config
+
+
 # ---------------------------------------------------------------------------
 # Helpers de autenticação
 # ---------------------------------------------------------------------------
@@ -183,12 +201,17 @@ def obter_endereco(latitude, longitude):
         return None
 
 
-# Horário (Brasília) a partir do qual o colaborador recebe o lembrete de bater ponto.
-LEMBRETE_HORA = os.environ.get("LEMBRETE_HORA", "09:00")
+# A janela e o intervalo do lembrete agora são configuráveis pelo gestor em
+# /gestor/configuracoes (tabela ConfiguracaoJornada), não mais por variável de ambiente.
 
 
 def colaborador_tem_registro_hoje(colaborador_id):
     """Verifica se o colaborador já bateu ao menos um ponto hoje (horário de Brasília)."""
+    return contar_registros_hoje(colaborador_id) > 0
+
+
+def contar_registros_hoje(colaborador_id):
+    """Conta quantas batidas de ponto o colaborador já fez hoje (horário de Brasília)."""
     hoje = agora_brasilia().date()
     registros_recentes = (
         RegistroPonto.query
@@ -197,7 +220,7 @@ def colaborador_tem_registro_hoje(colaborador_id):
         .limit(10)
         .all()
     )
-    return any(para_brasilia(r.data_hora).date() == hoje for r in registros_recentes)
+    return sum(1 for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje)
 
 
 def montar_resumo_diario(registros):
@@ -265,12 +288,15 @@ def logout():
 @app.route("/ponto", methods=["GET"])
 @login_required
 def ponto():
-    tem_registro_hoje = colaborador_tem_registro_hoje(session["user_id"])
+    config = obter_configuracao()
+    registros_hoje_count = contar_registros_hoje(session["user_id"])
     return render_template(
         "ponto.html",
         nome=session.get("nome"),
-        tem_registro_hoje=tem_registro_hoje,
-        lembrete_hora=LEMBRETE_HORA,
+        registros_hoje_count=registros_hoje_count,
+        horario_entrada=config.horario_entrada,
+        horario_saida=config.horario_saida,
+        intervalo_lembrete_minutos=config.intervalo_lembrete_minutos,
     )
 
 
@@ -306,6 +332,9 @@ def registrar_ponto():
 
     endereco = obter_endereco(latitude, longitude)
 
+    registros_hoje_count = contar_registros_hoje(user.id)
+    tipo_registro = "entrada" if registros_hoje_count % 2 == 0 else "saida"
+
     registro = RegistroPonto(
         colaborador_id=user.id,
         latitude=latitude,
@@ -313,12 +342,14 @@ def registrar_ponto():
         endereco=endereco,
         distancia_facial=float(distancia),
         origem="facial",
+        tipo=tipo_registro,
     )
     db.session.add(registro)
     db.session.commit()
 
     horario_local = para_brasilia(registro.data_hora)
-    mensagem = f"Ponto registrado às {horario_local.strftime('%d/%m/%Y %H:%M:%S')} (horário de Brasília)."
+    rotulo_tipo = "Entrada" if tipo_registro == "entrada" else "Saída"
+    mensagem = f"{rotulo_tipo} registrada às {horario_local.strftime('%d/%m/%Y %H:%M:%S')} (horário de Brasília)."
     if endereco:
         mensagem += f" Local: {endereco}."
     return jsonify({
@@ -327,6 +358,8 @@ def registrar_ponto():
         "horario": horario_local.strftime("%H:%M:%S"),
         "data": horario_local.strftime("%d/%m/%Y"),
         "endereco": endereco,
+        "tipo": tipo_registro,
+        "registros_hoje_count": registros_hoje_count + 1,
     })
 
 
@@ -438,6 +471,50 @@ def gestor_consulta():
 def gestor_cadastro():
     colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
     return render_template("gestor_cadastro.html", colaboradores=colaboradores)
+
+
+@app.route("/gestor/configuracoes", methods=["GET"])
+@gestor_required
+def gestor_configuracoes():
+    config = obter_configuracao()
+    return render_template("gestor_configuracoes.html", config=config)
+
+
+@app.route("/gestor/configuracoes/salvar", methods=["POST"])
+@gestor_required
+def salvar_configuracoes():
+    config = obter_configuracao()
+
+    horario_entrada = request.form.get("horario_entrada", "").strip()
+    horario_saida = request.form.get("horario_saida", "").strip()
+    intervalo = request.form.get("intervalo_lembrete_minutos", "").strip()
+
+    def _valido_hhmm(valor):
+        try:
+            h, m = valor.split(":")
+            return 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+        except Exception:
+            return False
+
+    if not (_valido_hhmm(horario_entrada) and _valido_hhmm(horario_saida)):
+        flash("Informe horários válidos no formato HH:MM.")
+        return redirect(url_for("gestor_configuracoes"))
+
+    try:
+        intervalo_int = int(intervalo)
+        if intervalo_int < 5 or intervalo_int > 240:
+            raise ValueError
+    except Exception:
+        flash("O intervalo do lembrete deve ser um número entre 5 e 240 minutos.")
+        return redirect(url_for("gestor_configuracoes"))
+
+    config.horario_entrada = horario_entrada
+    config.horario_saida = horario_saida
+    config.intervalo_lembrete_minutos = intervalo_int
+    db.session.commit()
+
+    flash("Configurações de jornada e lembretes atualizadas com sucesso.")
+    return redirect(url_for("gestor_configuracoes"))
 
 
 @app.route("/gestor/cadastrar", methods=["POST"])
