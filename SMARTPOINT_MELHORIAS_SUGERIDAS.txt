@@ -1,0 +1,1 @@
+Solicitadas melhorias visuais para SmartPoint. Este ZIP é apenas uma cópia do projeto com um resumo; alterações de interface ainda não foram aplicadas automaticamente.
