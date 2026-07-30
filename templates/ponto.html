@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block titulo %}Bater Ponto{% endblock %}
 {% block conteudo %}
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
 <div class="ponto-wrap">
 
   <div class="ponto-clock-card">
@@ -17,17 +20,28 @@
 
   <div class="card ponto-card">
     <h2>Registrar Ponto</h2>
-    <p class="ponto-instrucao">Posicione seu rosto na câmera e clique em "Bater Ponto".</p>
+    <p class="ponto-instrucao">Posicione seu rosto no quadro e confirme sua localização abaixo.</p>
 
-    <div class="camera-frame">
-      <video id="video" autoplay playsinline></video>
+    <div class="camera-viewfinder" id="camera-viewfinder">
+      <video id="video" autoplay playsinline muted></video>
       <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+      <span class="canto canto-tl"></span>
+      <span class="canto canto-tr"></span>
+      <span class="canto canto-bl"></span>
+      <span class="canto canto-br"></span>
+      <div class="linha-scan" id="linha-scan"></div>
+      <div class="pill-resultado" id="pill-resultado"></div>
     </div>
 
-    <div class="status-linha">
-      <span class="status-chip" id="chip-localizacao">
-        <span class="status-dot pendente"></span> Obtendo localização...
-      </span>
+    <div class="mapa-card">
+      <div id="mapa-local" class="mapa-local"></div>
+      <div class="endereco-box">
+        <span class="endereco-icone">📍</span>
+        <div>
+          <span class="endereco-label">Endereço aproximado</span>
+          <span class="endereco-texto" id="endereco-texto">Obtendo localização...</span>
+        </div>
+      </div>
     </div>
 
     <button id="btn-registrar" class="btn-primario" disabled>Bater Ponto</button>
@@ -38,6 +52,7 @@
   </div>
 </div>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // Relógio ao vivo — sempre no horário de Brasília, independente do fuso do dispositivo
 function atualizarRelogio() {
@@ -55,8 +70,9 @@ let longitude = null;
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const btnRegistrar = document.getElementById('btn-registrar');
-const chipLocalizacao = document.getElementById('chip-localizacao');
 const resultado = document.getElementById('resultado');
+const enderecoTexto = document.getElementById('endereco-texto');
+const pillResultado = document.getElementById('pill-resultado');
 
 // Câmera
 navigator.mediaDevices.getUserMedia({ video: true })
@@ -66,24 +82,63 @@ navigator.mediaDevices.getUserMedia({ video: true })
     resultado.className = 'resultado-msg erro';
   });
 
-// Geolocalização
+// ---------------------------------------------------------------------------
+// Mapa de confirmação (Leaflet + OpenStreetMap) — mostra pro colaborador ONDE
+// o ponto vai ser registrado antes de confirmar. O marcador não é arrastável
+// de propósito: é a localização real do GPS, não um ponto editável, pra manter
+// a confiabilidade do registro.
+// ---------------------------------------------------------------------------
+let mapa = null;
+let marcador = null;
+
+function iniciarMapa(lat, lon) {
+  if (mapa) return;
+  mapa = L.map('mapa-local', { zoomControl: false, attributionControl: false }).setView([lat, lon], 17);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+  }).addTo(mapa);
+  marcador = L.marker([lat, lon]).addTo(mapa);
+}
+
 if (navigator.geolocation) {
   navigator.geolocation.getCurrentPosition(
     pos => {
       latitude = pos.coords.latitude;
       longitude = pos.coords.longitude;
-      chipLocalizacao.innerHTML = '<span class="status-dot ok"></span> Localização obtida';
+
+      iniciarMapa(latitude, longitude);
       btnRegistrar.disabled = false;
+
+      fetch('/api/endereco-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ latitude, longitude })
+      })
+        .then(r => r.json())
+        .then(data => {
+          enderecoTexto.textContent = data.endereco || 'Endereço não encontrado (coordenadas serão salvas mesmo assim).';
+        })
+        .catch(() => {
+          enderecoTexto.textContent = 'Não foi possível buscar o endereço (coordenadas serão salvas mesmo assim).';
+        });
     },
     () => {
-      chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Não foi possível obter a localização';
+      enderecoTexto.textContent = 'Não foi possível obter sua localização. Verifique as permissões do navegador.';
     }
   );
 } else {
-  chipLocalizacao.innerHTML = '<span class="status-dot erro"></span> Geolocalização não suportada neste navegador';
+  enderecoTexto.textContent = 'Geolocalização não suportada neste navegador.';
 }
 
 let registrosHojeCount = {{ registros_hoje_count }};
+
+function mostrarPill(texto, sucesso) {
+  pillResultado.textContent = (sucesso ? '✅ ' : '⚠️ ') + texto;
+  pillResultado.className = 'pill-resultado mostrar' + (sucesso ? '' : ' pill-erro');
+  setTimeout(() => {
+    pillResultado.className = 'pill-resultado';
+  }, 4000);
+}
 
 btnRegistrar.addEventListener('click', () => {
   const ctx = canvas.getContext('2d');
@@ -93,6 +148,7 @@ btnRegistrar.addEventListener('click', () => {
   btnRegistrar.disabled = true;
   resultado.className = 'resultado-msg';
   resultado.textContent = 'Registrando...';
+  document.getElementById('camera-viewfinder').classList.add('escaneando');
 
   fetch('/api/registrar-ponto', {
     method: 'POST',
@@ -104,6 +160,11 @@ btnRegistrar.addEventListener('click', () => {
       resultado.textContent = data.mensagem;
       resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
       btnRegistrar.disabled = false;
+      document.getElementById('camera-viewfinder').classList.remove('escaneando');
+
+      const rotuloTipo = data.tipo === 'saida' ? 'Saída registrada' : 'Entrada registrada';
+      mostrarPill(data.ok ? rotuloTipo : 'Não foi possível registrar', data.ok);
+
       if (data.ok) {
         registrosHojeCount = data.registros_hoje_count;
         proximoLembreteEm = 0; // permite lembrete imediato de novo se a próxima pendência já valer a pena
@@ -114,6 +175,8 @@ btnRegistrar.addEventListener('click', () => {
       resultado.textContent = 'Erro ao registrar o ponto.';
       resultado.className = 'resultado-msg erro';
       btnRegistrar.disabled = false;
+      document.getElementById('camera-viewfinder').classList.remove('escaneando');
+      mostrarPill('Erro ao registrar', false);
     });
 });
 

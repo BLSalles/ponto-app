@@ -3,23 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{% block titulo %}Controle de Ponto{% endblock %}</title>
+  <title>{% block titulo %}SmartRoutine — Controle de Ponto{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 
   <!-- PWA: necessário para o iPhone permitir notificações (só funciona instalado na Tela de Início) -->
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
-  <meta name="theme-color" content="#4f46e5">
+  <meta name="theme-color" content="#0f5fa8">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Ponto">
+  <meta name="apple-mobile-web-app-title" content="SmartRoutine">
   <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-brand">
-      <span class="topbar-logo">⏱</span>
-      <span>Controle de Ponto</span>
+      <span class="topbar-logo"><img src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="SmartRoutine"></span>
+      <span>SmartRoutine</span>
+      <span class="topbar-subtitulo">Controle de Ponto</span>
     </div>
     {% if session.get('user_id') %}
       <div class="topbar-user">

@@ -33,6 +33,16 @@ if db_url.startswith("postgres://"):
 app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# Evita os erros "SSL SYSCALL error: EOF detected" / "SSL error: decryption failed"
+# que aparecem quando o Postgres do Render fecha conexões ociosas (ex.: depois do
+# app "dormir" no plano gratuito) e o pool tenta reaproveitar uma conexão morta.
+# pool_pre_ping testa a conexão antes de usar (reconecta sozinho se necessário) e
+# pool_recycle descarta conexões antigas antes que o servidor as feche primeiro.
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 280,
+}
+
 db = SQLAlchemy(app)
 
 # Distância máxima aceita entre encodings faciais para considerar "é a mesma pessoa"
@@ -327,14 +337,17 @@ def enviar_push_colaborador(colaborador, titulo, corpo):
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims={"sub": f"mailto:{VAPID_CONTACT_EMAIL}"},
             )
+            print(f"[push] enviado para {colaborador.nome} (endpoint ...{sub.endpoint[-12:]})")
         except WebPushException as ex:
             status = getattr(ex.response, "status_code", None)
+            print(f"[push] falhou para {colaborador.nome}: status={status}")
             if status in (404, 410):
                 db.session.delete(sub)
                 db.session.commit()
-        except Exception:
+                print(f"[push] inscrição expirada removida ({colaborador.nome})")
+        except Exception as ex:
             # Nunca deixa uma falha de push derrubar o job do agendador.
-            pass
+            print(f"[push] erro inesperado ao enviar para {colaborador.nome}: {ex}")
 
 
 def verificar_e_enviar_lembretes_push():
@@ -343,48 +356,57 @@ def verificar_e_enviar_lembretes_push():
     if not PUSH_HABILITADO:
         return
 
-    with app.app_context():
-        config = obter_configuracao()
-        agora_str = agora_brasilia().strftime("%H:%M")
-        colaboradores = Colaborador.query.filter_by(is_gestor=False).all()
+    try:
+        with app.app_context():
+            config = obter_configuracao()
+            agora_str = agora_brasilia().strftime("%H:%M")
+            colaboradores = Colaborador.query.filter_by(is_gestor=False).all()
+            enviados = 0
 
-        for colaborador in colaboradores:
-            if not colaborador.push_subscriptions:
-                continue
-
-            count = contar_registros_hoje(colaborador.id)
-            pendencia = None
-            if count == 0 and agora_str >= config.horario_entrada:
-                pendencia = "entrada"
-            elif count % 2 == 1 and agora_str >= config.horario_saida:
-                pendencia = "saida"
-
-            if not pendencia:
-                continue
-
-            ultimo = UltimoLembretePush.query.filter_by(
-                colaborador_id=colaborador.id, tipo=pendencia
-            ).first()
-
-            if ultimo:
-                minutos_desde_ultimo = (datetime.utcnow() - ultimo.enviado_em).total_seconds() / 60
-                if minutos_desde_ultimo < config.intervalo_lembrete_minutos:
+            for colaborador in colaboradores:
+                if not colaborador.push_subscriptions:
                     continue
 
-            texto = (
-                "Você ainda não bateu a ENTRADA hoje!"
-                if pendencia == "entrada"
-                else "Você ainda não bateu a SAÍDA hoje!"
-            )
-            enviar_push_colaborador(colaborador, "Lembrete de ponto", texto)
+                count = contar_registros_hoje(colaborador.id)
+                pendencia = None
+                if count == 0 and agora_str >= config.horario_entrada:
+                    pendencia = "entrada"
+                elif count % 2 == 1 and agora_str >= config.horario_saida:
+                    pendencia = "saida"
 
-            if ultimo:
-                ultimo.enviado_em = datetime.utcnow()
-            else:
-                db.session.add(UltimoLembretePush(
-                    colaborador_id=colaborador.id, tipo=pendencia, enviado_em=datetime.utcnow()
-                ))
-            db.session.commit()
+                if not pendencia:
+                    continue
+
+                ultimo = UltimoLembretePush.query.filter_by(
+                    colaborador_id=colaborador.id, tipo=pendencia
+                ).first()
+
+                if ultimo:
+                    minutos_desde_ultimo = (datetime.utcnow() - ultimo.enviado_em).total_seconds() / 60
+                    if minutos_desde_ultimo < config.intervalo_lembrete_minutos:
+                        continue
+
+                texto = (
+                    "Você ainda não bateu a ENTRADA hoje!"
+                    if pendencia == "entrada"
+                    else "Você ainda não bateu a SAÍDA hoje!"
+                )
+                enviar_push_colaborador(colaborador, "Lembrete de ponto", texto)
+                enviados += 1
+
+                if ultimo:
+                    ultimo.enviado_em = datetime.utcnow()
+                else:
+                    db.session.add(UltimoLembretePush(
+                        colaborador_id=colaborador.id, tipo=pendencia, enviado_em=datetime.utcnow()
+                    ))
+                db.session.commit()
+
+            print(f"[push] verificação às {agora_str} (Brasília) — {enviados} lembrete(s) enviado(s).")
+    except Exception as ex:
+        # Nunca deixa um erro transitório (ex.: banco temporariamente indisponível)
+        # cancelar o agendador — na próxima execução (5 min depois) tenta de novo.
+        print(f"[push] falha ao verificar/enviar lembretes: {ex}")
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +415,19 @@ def verificar_e_enviar_lembretes_push():
 @app.route("/", methods=["GET"])
 def index():
     return redirect(url_for("login"))
+
+
+@app.route("/api/endereco-preview", methods=["POST"])
+@login_required
+def endereco_preview():
+    """Devolve o endereço aproximado a partir de lat/lon, para mostrar no mapa
+    ANTES do colaborador confirmar o ponto (o registro em si roda a mesma
+    geocodificação de novo no momento de salvar, de forma independente)."""
+    dados = request.get_json(silent=True) or {}
+    latitude = dados.get("latitude")
+    longitude = dados.get("longitude")
+    endereco = obter_endereco(latitude, longitude)
+    return jsonify({"endereco": endereco})
 
 
 @app.route("/api/push-subscribe", methods=["POST"])
