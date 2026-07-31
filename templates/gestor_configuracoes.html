@@ -2,6 +2,64 @@
 {% block titulo %}Configurações - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
+<div class="card">
+  <div class="card-header">
+    <h2>Marca e Aparência</h2>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    Personalize o nome da empresa, a logo e as cores do sistema. As mudanças aparecem
+    para todos os colaboradores imediatamente — cada empresa que usar o SmartPoint pode
+    deixar com a própria identidade visual.
+  </p>
+
+  <form method="POST" action="{{ url_for('salvar_marca') }}" enctype="multipart/form-data">
+    <label>Nome da empresa</label>
+    <input type="text" name="nome_empresa" value="{{ marca.nome_empresa }}" maxlength="60" placeholder="Ex: Grupo Fleury">
+
+    <div class="marca-logo-linha">
+      <div class="marca-logo-preview">
+        {% if marca.logo_header_base64 %}
+          <img src="{{ marca.logo_header_base64 }}" alt="Logo atual">
+        {% else %}
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="9.2" stroke="#9ca3af" stroke-width="1.6"/>
+            <path d="M12 7v5l3.3 1.9" stroke="#9ca3af" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        {% endif %}
+      </div>
+      <div class="marca-logo-campo">
+        <label>Logo (PNG ou JPG — fundo transparente fica melhor)</label>
+        <input type="file" name="logo" accept="image/png, image/jpeg">
+      </div>
+    </div>
+
+    <div class="form-grid" style="margin-top:14px;">
+      <div class="form-campo">
+        <label>Cor primária</label>
+        <div class="cor-campo">
+          <input type="color" name="cor_primaria" value="{{ marca.cor_primaria }}" oninput="this.nextElementSibling.textContent = this.value">
+          <span>{{ marca.cor_primaria }}</span>
+        </div>
+      </div>
+      <div class="form-campo">
+        <label>Cor secundária (sucesso/destaque)</label>
+        <div class="cor-campo">
+          <input type="color" name="cor_secundaria" value="{{ marca.cor_secundaria }}" oninput="this.nextElementSibling.textContent = this.value">
+          <span>{{ marca.cor_secundaria }}</span>
+        </div>
+      </div>
+    </div>
+
+    <button type="submit" class="btn-primario">Salvar marca</button>
+  </form>
+
+  {% if marca.logo_header_base64 %}
+    <form method="POST" action="{{ url_for('remover_logo_marca') }}" style="margin-top:8px;">
+      <button type="submit" class="btn-secundario">Remover logo (voltar ao ícone padrão)</button>
+    </form>
+  {% endif %}
+</div>
+
 <div class="card {% if push_habilitado %}card-sucesso{% else %}card-aviso{% endif %}">
   <div class="card-header">
     <h2>{% if push_habilitado %}✅ Notificações push ativas{% else %}⚠️ Notificações push não configuradas{% endif %}</h2>
@@ -70,6 +128,10 @@
       <div class="form-campo">
         <label>Repetir lembrete a cada (minutos)</label>
         <input type="number" name="intervalo_lembrete_minutos" min="5" max="240" value="{{ config.intervalo_lembrete_minutos }}" required>
+      </div>
+      <div class="form-campo">
+        <label>Meta de horas diárias</label>
+        <input type="number" name="meta_horas_diarias" min="1" max="24" step="0.5" value="{{ config.meta_horas_diarias }}" required>
       </div>
     </div>
     <button type="submit" class="btn-primario">Salvar configurações</button>

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block titulo %}Consulta - Painel do Gestor{% endblock %}
+{% block titulo %}Dashboard - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
 <div class="stats-grid">
@@ -7,18 +7,31 @@
     <span class="stat-valor">{{ total_colaboradores }}</span>
     <span class="stat-label">Colaboradores ativos</span>
   </div>
-  <div class="stat-card">
-    <span class="stat-valor">{{ registros_hoje }}</span>
-    <span class="stat-label">Registros hoje</span>
+  <div class="stat-card stat-sucesso">
+    <span class="stat-valor">{{ presentes }}</span>
+    <span class="stat-label">Presentes hoje</span>
   </div>
-  <div class="stat-card {% if sem_cadastro_facial %}stat-alerta{% endif %}">
-    <span class="stat-valor">{{ sem_cadastro_facial }}</span>
-    <span class="stat-label">Sem cadastro facial</span>
+  <div class="stat-card {% if atrasados %}stat-alerta{% endif %}">
+    <span class="stat-valor">{{ atrasados }}</span>
+    <span class="stat-label">Atrasados</span>
+  </div>
+  <div class="stat-card {% if colaboradores_sem_registro_hoje %}stat-alerta{% endif %}">
+    <span class="stat-valor">{{ colaboradores_sem_registro_hoje|length }}</span>
+    <span class="stat-label">Ausentes</span>
   </div>
   <a href="{{ url_for('gestor_ajustes') }}" class="stat-card stat-card-link {% if ajustes_pendentes %}stat-alerta{% endif %}">
     <span class="stat-valor">{{ ajustes_pendentes }}</span>
-    <span class="stat-label">Ajustes pendentes</span>
+    <span class="stat-label">Solicitações pendentes</span>
   </a>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Entradas por horário (hoje)</h2>
+  </div>
+  <div class="grafico-wrap">
+    <canvas id="grafico-entradas" height="90"></canvas>
+  </div>
 </div>
 
 {% if colaboradores_sem_registro_hoje %}
@@ -48,6 +61,9 @@
 <div class="card">
   <div class="card-header">
     <h2>Colaboradores</h2>
+    {% if sem_cadastro_facial %}
+      <span class="badge badge-alerta">{{ sem_cadastro_facial }} sem cadastro facial</span>
+    {% endif %}
   </div>
   <div class="lista-colaboradores">
     {% for c in colaboradores %}
@@ -114,4 +130,31 @@
     </table>
   </div>
 </div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+  const ctx = document.getElementById('grafico-entradas').getContext('2d');
+  const corPrimaria = getComputedStyle(document.documentElement).getPropertyValue('--cor-primaria').trim() || '#0f5fa8';
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: {{ horas_grafico | tojson }},
+      datasets: [{
+        label: 'Entradas',
+        data: {{ contagem_grafico | tojson }},
+        backgroundColor: corPrimaria,
+        borderRadius: 4,
+        maxBarThickness: 28,
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#eef0f3' } },
+        x: { grid: { display: false } }
+      }
+    }
+  });
+</script>
 {% endblock %}

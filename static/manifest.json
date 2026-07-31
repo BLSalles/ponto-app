@@ -1,6 +1,6 @@
 {
-  "name": "SmartRoutine — Controle de Ponto",
-  "short_name": "SmartRoutine",
+  "name": "SmartPoint — Controle de Ponto",
+  "short_name": "SmartPoint",
   "start_url": "/ponto",
   "display": "standalone",
   "background_color": "#0a2a6b",

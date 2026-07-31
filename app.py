@@ -5,7 +5,7 @@ import base64
 import json
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from functools import wraps
 from pywebpush import webpush, WebPushException
@@ -79,10 +79,12 @@ def filtro_brasilia(dt, fmt="%d/%m/%Y %H:%M:%S"):
 
 @app.context_processor
 def injetar_contexto_navegacao():
-    """Disponibiliza o número de ajustes pendentes para o badge do menu do gestor em qualquer página."""
+    """Disponibiliza o número de ajustes pendentes e a configuração de marca (logo/cores)
+    para qualquer página, sem precisar passar manualmente em cada rota."""
+    contexto = {"marca": obter_marca()}
     if session.get("is_gestor"):
-        return {"ajustes_pendentes_nav": SolicitacaoAjuste.query.filter_by(status="pendente").count()}
-    return {}
+        contexto["ajustes_pendentes_nav"] = SolicitacaoAjuste.query.filter_by(status="pendente").count()
+    return contexto
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,7 @@ class ConfiguracaoJornada(db.Model):
     horario_entrada = db.Column(db.String(5), default="08:00")
     horario_saida = db.Column(db.String(5), default="18:00")
     intervalo_lembrete_minutos = db.Column(db.Integer, default=60)
+    meta_horas_diarias = db.Column(db.Float, default=8.0)
 
 
 def obter_configuracao():
@@ -152,7 +155,86 @@ def obter_configuracao():
     return config
 
 
-class PushSubscription(db.Model):
+class ConfiguracaoMarca(db.Model):
+    """Configuração de marca (white-label): permite que cada gestor personalize o
+    nome da empresa, a logo e as cores do sistema — feito para o app ser vendido
+    e reaproveitado por diferentes clientes/empresas."""
+    id = db.Column(db.Integer, primary_key=True)
+    nome_empresa = db.Column(db.String(60), default="SmartPoint")
+    logo_header_base64 = db.Column(db.Text, nullable=True)   # logo para o cabeçalho/login
+    icone_192_base64 = db.Column(db.Text, nullable=True)     # ícone PWA 192x192
+    icone_512_base64 = db.Column(db.Text, nullable=True)     # ícone PWA 512x512
+    cor_primaria = db.Column(db.String(7), default="#0f5fa8")
+    cor_secundaria = db.Column(db.String(7), default="#17b26a")
+
+
+def obter_marca():
+    """Devolve a configuração de marca (cria uma com valores padrão se ainda não existir)."""
+    marca = ConfiguracaoMarca.query.first()
+    if not marca:
+        marca = ConfiguracaoMarca()
+        db.session.add(marca)
+        db.session.commit()
+    return marca
+
+
+def processar_logo_upload(arquivo_bytes):
+    """Recebe os bytes de uma imagem enviada pelo gestor e devolve 3 data-URIs (base64)
+    prontas para salvar no banco: logo para cabeçalho, ícone 192px e ícone 512px."""
+    from PIL import Image
+    import io as _io
+
+    img = Image.open(_io.BytesIO(arquivo_bytes)).convert("RGBA")
+
+    # Logo do cabeçalho: mantém a proporção original, altura fixa de 160px.
+    proporcao = 160 / img.height
+    header_img = img.resize((max(1, int(img.width * proporcao)), 160), Image.LANCZOS)
+    buf_header = _io.BytesIO()
+    header_img.save(buf_header, "PNG")
+    logo_header_b64 = "data:image/png;base64," + base64.b64encode(buf_header.getvalue()).decode()
+
+    # Ícones quadrados (PWA / ícone da Tela de Início): centraliza em fundo branco.
+    def _icone_quadrado(tamanho):
+        lado = max(img.width, img.height)
+        fundo = Image.new("RGBA", (lado, lado), (255, 255, 255, 255))
+        offset = ((lado - img.width) // 2, (lado - img.height) // 2)
+        fundo.paste(img, offset, img)
+        fundo = fundo.resize((tamanho, tamanho), Image.LANCZOS).convert("RGB")
+        buf = _io.BytesIO()
+        fundo.save(buf, "PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    icone_192_b64 = _icone_quadrado(192)
+    icone_512_b64 = _icone_quadrado(512)
+
+    return logo_header_b64, icone_192_b64, icone_512_b64
+
+
+@app.template_filter("escurecer")
+def filtro_escurecer(cor_hex, fator=0.3):
+    """Escurece uma cor hex (#rrggbb) em X% — usado para gerar tons de hover/gradiente
+    automaticamente a partir da cor primária escolhida pelo gestor."""
+    try:
+        cor_hex = (cor_hex or "").lstrip("#")
+        r, g, b = int(cor_hex[0:2], 16), int(cor_hex[2:4], 16), int(cor_hex[4:6], 16)
+        r, g, b = (max(0, int(c * (1 - fator))) for c in (r, g, b))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return cor_hex
+
+
+@app.template_filter("clarear")
+def filtro_clarear(cor_hex, fator=0.85):
+    """Clareia uma cor hex misturando com branco (fator = proporção de branco, 0 a 1) —
+    usado para gerar o tom clarinho de fundo (ex.: badges, hover leve) a partir da cor
+    primária escolhida pelo gestor."""
+    try:
+        cor_hex = (cor_hex or "").lstrip("#")
+        r, g, b = int(cor_hex[0:2], 16), int(cor_hex[2:4], 16), int(cor_hex[4:6], 16)
+        r, g, b = (min(255, int(c + (255 - c) * fator)) for c in (r, g, b))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return cor_hex
     """Inscrição de notificação push (Web Push) de um colaborador em um dispositivo/navegador."""
     id = db.Column(db.Integer, primary_key=True)
     colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
@@ -282,6 +364,7 @@ def montar_resumo_diario(registros):
             "data": dia,
             "batidas": horarios,
             "total_horas": f"{horas:02d}:{minutos:02d}",
+            "total_horas_decimal": round(total_segundos / 3600, 2),
             "incompleto": len(horarios) % 2 != 0,
         })
     return resumo
@@ -506,10 +589,35 @@ def logout():
 def ponto():
     config = obter_configuracao()
     registros_hoje_count = contar_registros_hoje(session["user_id"])
+
+    hoje = agora_brasilia().date()
+    registros_recentes = (
+        RegistroPonto.query
+        .filter_by(colaborador_id=session["user_id"])
+        .order_by(RegistroPonto.data_hora.desc())
+        .limit(20)
+        .all()
+    )
+    resumo_lista = montar_resumo_diario(registros_recentes)
+    resumo_hoje = next((r for r in resumo_lista if r["data"] == hoje), None)
+    registros_hoje_lista = [r for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje]
+
+    hora_atual = agora_brasilia().hour
+    if hora_atual < 12:
+        saudacao = "Bom dia"
+    elif hora_atual < 18:
+        saudacao = "Boa tarde"
+    else:
+        saudacao = "Boa noite"
+
     return render_template(
         "ponto.html",
         nome=session.get("nome"),
+        saudacao=saudacao,
         registros_hoje_count=registros_hoje_count,
+        registros_hoje_lista=registros_hoje_lista,
+        resumo_hoje=resumo_hoje,
+        meta_horas_diarias=config.meta_horas_diarias,
         horario_entrada=config.horario_entrada,
         horario_saida=config.horario_saida,
         intervalo_lembrete_minutos=config.intervalo_lembrete_minutos,
@@ -654,33 +762,65 @@ def gestor_dashboard():
 @app.route("/gestor/consulta", methods=["GET"])
 @gestor_required
 def gestor_consulta():
+    from collections import defaultdict
+
+    config = obter_configuracao()
     registros = (
         RegistroPonto.query.order_by(RegistroPonto.data_hora.desc()).limit(200).all()
     )
     colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
-
-    hoje_brasilia = agora_brasilia().date()
-    registros_hoje = sum(
-        1 for r in registros if para_brasilia(r.data_hora).date() == hoje_brasilia
-    )
     total_colaboradores = len(colaboradores)
     sem_cadastro_facial = sum(1 for c in colaboradores if not c.face_encoding)
 
-    colaboradores_sem_registro_hoje = [
-        c for c in colaboradores if not colaborador_tem_registro_hoje(c.id)
-    ]
+    hoje_brasilia = agora_brasilia().date()
+
+    # Consulta dedicada dos registros de HOJE (não depende do limite de exibição
+    # da tabela abaixo, então continua correta mesmo com empresas grandes).
+    limite_inferior_utc = datetime.combine(hoje_brasilia, datetime.min.time()) - timedelta(hours=6)
+    candidatos_hoje = (
+        RegistroPonto.query
+        .filter(RegistroPonto.data_hora >= limite_inferior_utc)
+        .order_by(RegistroPonto.data_hora.asc())
+        .all()
+    )
+    registros_hoje_todos = [r for r in candidatos_hoje if para_brasilia(r.data_hora).date() == hoje_brasilia]
+
+    por_colaborador_hoje = defaultdict(list)
+    for r in registros_hoje_todos:
+        por_colaborador_hoje[r.colaborador_id].append(r)
+
+    presentes = sum(1 for c in colaboradores if por_colaborador_hoje.get(c.id))
+    colaboradores_sem_registro_hoje = [c for c in colaboradores if not por_colaborador_hoje.get(c.id)]
+
+    atrasados = 0
+    entradas_por_hora = {}
+    for c in colaboradores:
+        regs = por_colaborador_hoje.get(c.id)
+        if not regs:
+            continue
+        primeira_hoje = para_brasilia(regs[0].data_hora)  # já vem ordenado asc
+        if primeira_hoje.strftime("%H:%M") > config.horario_entrada:
+            atrasados += 1
+        entradas_por_hora[primeira_hoje.hour] = entradas_por_hora.get(primeira_hoje.hour, 0) + 1
 
     ajustes_pendentes = SolicitacaoAjuste.query.filter_by(status="pendente").count()
+
+    horas_grafico = [f"{h:02d}:00" for h in range(6, 21)]
+    contagem_grafico = [entradas_por_hora.get(h, 0) for h in range(6, 21)]
 
     return render_template(
         "gestor_consulta.html",
         registros=registros,
         colaboradores=colaboradores,
-        registros_hoje=registros_hoje,
+        registros_hoje=len(registros_hoje_todos),
         total_colaboradores=total_colaboradores,
         sem_cadastro_facial=sem_cadastro_facial,
         colaboradores_sem_registro_hoje=colaboradores_sem_registro_hoje,
         ajustes_pendentes=ajustes_pendentes,
+        presentes=presentes,
+        atrasados=atrasados,
+        horas_grafico=horas_grafico,
+        contagem_grafico=contagem_grafico,
     )
 
 
@@ -696,6 +836,82 @@ def gestor_cadastro():
 def gestor_configuracoes():
     config = obter_configuracao()
     return render_template("gestor_configuracoes.html", config=config, push_habilitado=PUSH_HABILITADO)
+
+
+@app.route("/gestor/configuracoes/marca", methods=["POST"])
+@gestor_required
+def salvar_marca():
+    """Permite ao gestor personalizar o nome da empresa, a logo e as cores do
+    sistema (white-label) — cada empresa que usar o app pode deixar com a própria cara."""
+    import re
+
+    marca = obter_marca()
+
+    nome_empresa = request.form.get("nome_empresa", "").strip()
+    cor_primaria = request.form.get("cor_primaria", "").strip()
+    cor_secundaria = request.form.get("cor_secundaria", "").strip()
+    arquivo_logo = request.files.get("logo")
+
+    def _valida_hex(cor):
+        return bool(re.fullmatch(r"#[0-9a-fA-F]{6}", cor or ""))
+
+    if nome_empresa:
+        marca.nome_empresa = nome_empresa[:60]
+    if _valida_hex(cor_primaria):
+        marca.cor_primaria = cor_primaria
+    if _valida_hex(cor_secundaria):
+        marca.cor_secundaria = cor_secundaria
+
+    if arquivo_logo and arquivo_logo.filename:
+        try:
+            dados = arquivo_logo.read()
+            if len(dados) > 3 * 1024 * 1024:
+                flash("A imagem enviada é muito grande (máximo 3MB). Tente uma imagem menor.")
+            else:
+                logo_header, icone_192, icone_512 = processar_logo_upload(dados)
+                marca.logo_header_base64 = logo_header
+                marca.icone_192_base64 = icone_192
+                marca.icone_512_base64 = icone_512
+        except Exception:
+            flash("Não foi possível processar a imagem enviada. Tente um arquivo PNG ou JPG.")
+
+    db.session.commit()
+    flash("Marca do sistema atualizada com sucesso.")
+    return redirect(url_for("gestor_configuracoes"))
+
+
+@app.route("/gestor/configuracoes/marca/remover-logo", methods=["POST"])
+@gestor_required
+def remover_logo_marca():
+    marca = obter_marca()
+    marca.logo_header_base64 = None
+    marca.icone_192_base64 = None
+    marca.icone_512_base64 = None
+    db.session.commit()
+    flash("Logo removida — voltando para o ícone padrão.")
+    return redirect(url_for("gestor_configuracoes"))
+
+
+@app.route("/manifest.json")
+def manifest_json():
+    """Manifesto do PWA gerado dinamicamente com o nome/cores/ícone da marca configurada
+    pelo gestor, para que o app instalado na Tela de Início reflita a marca certa."""
+    marca = obter_marca()
+    icone_192 = marca.icone_192_base64 or (request.url_root.rstrip("/") + url_for("static", filename="icons/icon-192.png"))
+    icone_512 = marca.icone_512_base64 or (request.url_root.rstrip("/") + url_for("static", filename="icons/icon-512.png"))
+    nome_empresa = marca.nome_empresa or "SmartPoint"
+    return jsonify({
+        "name": f"{nome_empresa} — Controle de Ponto",
+        "short_name": nome_empresa[:12],
+        "start_url": "/ponto",
+        "display": "standalone",
+        "background_color": marca.cor_primaria,
+        "theme_color": marca.cor_primaria,
+        "icons": [
+            {"src": icone_192, "sizes": "192x192", "type": "image/png"},
+            {"src": icone_512, "sizes": "512x512", "type": "image/png"},
+        ],
+    })
 
 
 @app.route("/gestor/configuracoes/gerar-chaves-push", methods=["POST"])
@@ -722,6 +938,7 @@ def salvar_configuracoes():
     horario_entrada = request.form.get("horario_entrada", "").strip()
     horario_saida = request.form.get("horario_saida", "").strip()
     intervalo = request.form.get("intervalo_lembrete_minutos", "").strip()
+    meta_horas = request.form.get("meta_horas_diarias", "").strip()
 
     def _valido_hhmm(valor):
         try:
@@ -742,9 +959,18 @@ def salvar_configuracoes():
         flash("O intervalo do lembrete deve ser um número entre 5 e 240 minutos.")
         return redirect(url_for("gestor_configuracoes"))
 
+    try:
+        meta_horas_float = float(meta_horas.replace(",", "."))
+        if meta_horas_float <= 0 or meta_horas_float > 24:
+            raise ValueError
+    except Exception:
+        flash("A meta de horas diárias deve ser um número entre 0 e 24.")
+        return redirect(url_for("gestor_configuracoes"))
+
     config.horario_entrada = horario_entrada
     config.horario_saida = horario_saida
     config.intervalo_lembrete_minutos = intervalo_int
+    config.meta_horas_diarias = meta_horas_float
     db.session.commit()
 
     flash("Configurações de jornada e lembretes atualizadas com sucesso.")
@@ -923,12 +1149,18 @@ def _garantir_colunas_novas():
     from sqlalchemy import inspect, text
 
     inspector = inspect(db.engine)
-    colunas = [col["name"] for col in inspector.get_columns("registro_ponto")]
     comandos = []
-    if "endereco" not in colunas:
+
+    colunas_registro = [col["name"] for col in inspector.get_columns("registro_ponto")]
+    if "endereco" not in colunas_registro:
         comandos.append("ALTER TABLE registro_ponto ADD COLUMN endereco VARCHAR(255)")
-    if "origem" not in colunas:
+    if "origem" not in colunas_registro:
         comandos.append("ALTER TABLE registro_ponto ADD COLUMN origem VARCHAR(20)")
+
+    if "configuracao_jornada" in inspector.get_table_names():
+        colunas_jornada = [col["name"] for col in inspector.get_columns("configuracao_jornada")]
+        if "meta_horas_diarias" not in colunas_jornada:
+            comandos.append("ALTER TABLE configuracao_jornada ADD COLUMN meta_horas_diarias FLOAT DEFAULT 8.0")
 
     if comandos:
         with db.engine.connect() as conn:

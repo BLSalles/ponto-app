@@ -6,6 +6,10 @@
 
 <div class="ponto-wrap">
 
+  <div class="saudacao-linha">
+    <h1 class="saudacao-titulo">{{ saudacao }}, {{ nome.split(' ')[0] if nome else '' }} 👋</h1>
+  </div>
+
   <div class="ponto-clock-card">
     <div class="ponto-clock-label">Horário de Brasília</div>
     <div class="ponto-clock" id="relogio">--:--:--</div>
@@ -39,7 +43,7 @@
         <span class="endereco-icone">📍</span>
         <div>
           <span class="endereco-label">Endereço aproximado</span>
-          <span class="endereco-texto" id="endereco-texto">Obtendo localização...</span>
+          <span class="endereco-texto" id="endereco-texto"><span class="skeleton"></span></span>
         </div>
       </div>
     </div>
@@ -49,6 +53,44 @@
 
     <button type="button" id="btn-lembrete" class="btn-secundario">🔔 Ativar lembrete no navegador</button>
     <p id="aviso-ios" class="ponto-instrucao" style="display:none; color:#92400e; font-weight:500;"></p>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Jornada de Hoje</h2>
+      {% if resumo_hoje and resumo_hoje.incompleto %}
+        <span class="badge badge-alerta">Incompleta</span>
+      {% endif %}
+    </div>
+
+    {% set horas_feitas = resumo_hoje.total_horas_decimal if resumo_hoje else 0 %}
+    {% set percentual = ((horas_feitas / meta_horas_diarias) * 100) if meta_horas_diarias else 0 %}
+    {% set percentual = 100 if percentual > 100 else percentual %}
+
+    <div class="progresso-jornada">
+      <div class="progresso-barra">
+        <div class="progresso-preenchido" style="width: {{ percentual }}%;"></div>
+      </div>
+      <div class="progresso-legenda">
+        <span>{{ resumo_hoje.total_horas if resumo_hoje else "00:00" }} de {{ "%.0f"|format(meta_horas_diarias) }}h</span>
+        <span>{{ "%.0f"|format(percentual) }}%</span>
+      </div>
+    </div>
+
+    {% if registros_hoje_lista %}
+      <div class="lista-batidas-hoje">
+        {% for r in registros_hoje_lista|sort(attribute='data_hora')|reverse %}
+          <div class="batida-item">
+            <span class="batida-tipo {% if r.tipo == 'saida' %}batida-saida{% endif %}">
+              {{ 'Saída' if r.tipo == 'saida' else 'Entrada' }}
+            </span>
+            <span class="batida-horario">{{ r.data_hora | brasilia('%H:%M') }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="vazio">Nenhuma batida registrada ainda hoje.</p>
+    {% endif %}
   </div>
 </div>
 
