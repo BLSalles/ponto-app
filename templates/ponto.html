@@ -12,7 +12,9 @@
 
   <div class="ponto-clock-card">
     <div class="ponto-clock-label">Horário de Brasília</div>
-    <div class="ponto-clock" id="relogio">--:--:--</div>
+    <div class="ponto-clock">
+      <span id="relogio-principal">--:--</span><sup id="relogio-segundos">--</sup>
+    </div>
     <div class="ponto-data" id="data-atual">—</div>
   </div>
 
@@ -48,7 +50,11 @@
       </div>
     </div>
 
-    <button id="btn-registrar" class="btn-primario" disabled>Bater Ponto</button>
+    <button id="btn-registrar" class="btn-segurar" disabled>
+      <span class="btn-segurar-preenchimento" id="btn-segurar-preenchimento"></span>
+      <span class="btn-segurar-texto">⏱ Registrar Ponto</span>
+    </button>
+    <p class="btn-segurar-instrucao">Mantenha o botão pressionado para registrar</p>
     <p id="resultado" class="resultado-msg"></p>
 
     <button type="button" id="btn-lembrete" class="btn-secundario">🔔 Ativar lembrete no navegador</button>
@@ -77,20 +83,20 @@
       </div>
     </div>
 
-    {% if registros_hoje_lista %}
-      <div class="lista-batidas-hoje">
-        {% for r in registros_hoje_lista|sort(attribute='data_hora')|reverse %}
-          <div class="batida-item">
-            <span class="batida-tipo {% if r.tipo == 'saida' %}batida-saida{% endif %}">
-              {{ 'Saída' if r.tipo == 'saida' else 'Entrada' }}
+    <details class="marcacoes-hoje" {% if registros_hoje_lista %}open{% endif %}>
+      <summary>Marcações de hoje <span class="marcacoes-contagem">({{ registros_hoje_lista|length }})</span></summary>
+      {% if registros_hoje_lista %}
+        <div class="chips-batidas">
+          {% for r in registros_hoje_lista|sort(attribute='data_hora') %}
+            <span class="chip-batida {{ 'chip-saida' if r.tipo == 'saida' else 'chip-entrada' }}">
+              <span class="chip-dot"></span>{{ r.data_hora | brasilia('%H:%M') }}
             </span>
-            <span class="batida-horario">{{ r.data_hora | brasilia('%H:%M') }}</span>
-          </div>
-        {% endfor %}
-      </div>
-    {% else %}
-      <p class="vazio">Nenhuma batida registrada ainda hoje.</p>
-    {% endif %}
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="vazio">Nenhuma batida registrada ainda hoje.</p>
+      {% endif %}
+    </details>
   </div>
 </div>
 
@@ -99,9 +105,11 @@
 // Relógio ao vivo — sempre no horário de Brasília, independente do fuso do dispositivo
 function atualizarRelogio() {
   const agora = new Date();
-  const opcoesHora = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+  const opcoesHoraMin = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false };
+  const opcoesSegundos = { timeZone: 'America/Sao_Paulo', second: '2-digit' };
   const opcoesData = { timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' };
-  document.getElementById('relogio').textContent = new Intl.DateTimeFormat('pt-BR', opcoesHora).format(agora);
+  document.getElementById('relogio-principal').textContent = new Intl.DateTimeFormat('pt-BR', opcoesHoraMin).format(agora);
+  document.getElementById('relogio-segundos').textContent = new Intl.DateTimeFormat('pt-BR', opcoesSegundos).format(agora);
   document.getElementById('data-atual').textContent = new Intl.DateTimeFormat('pt-BR', opcoesData).format(agora);
 }
 atualizarRelogio();
@@ -182,7 +190,7 @@ function mostrarPill(texto, sucesso) {
   }, 4000);
 }
 
-btnRegistrar.addEventListener('click', () => {
+function executarRegistro() {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   const foto = canvas.toDataURL('image/jpeg', 0.8);
@@ -220,7 +228,42 @@ btnRegistrar.addEventListener('click', () => {
       document.getElementById('camera-viewfinder').classList.remove('escaneando');
       mostrarPill('Erro ao registrar', false);
     });
-});
+}
+
+// ---------------------------------------------------------------------------
+// Botão "segure para registrar" — exige pressionar por ~700ms antes de
+// confirmar. Evita toques acidentais (é mais fácil apertar sem querer um
+// botão simples do que manter pressionado por quase 1 segundo de propósito).
+// ---------------------------------------------------------------------------
+const DURACAO_SEGURAR_MS = 700;
+const preenchimento = document.getElementById('btn-segurar-preenchimento');
+let temporizadorSegurar = null;
+
+function iniciarSegurar(e) {
+  if (btnRegistrar.disabled) return;
+  e.preventDefault();
+  btnRegistrar.classList.add('segurando');
+  preenchimento.style.transition = `width ${DURACAO_SEGURAR_MS}ms linear`;
+  requestAnimationFrame(() => { preenchimento.style.width = '100%'; });
+  temporizadorSegurar = setTimeout(() => {
+    btnRegistrar.classList.remove('segurando');
+    preenchimento.style.transition = 'none';
+    preenchimento.style.width = '0%';
+    executarRegistro();
+  }, DURACAO_SEGURAR_MS);
+}
+
+function cancelarSegurar() {
+  clearTimeout(temporizadorSegurar);
+  btnRegistrar.classList.remove('segurando');
+  preenchimento.style.transition = 'width 0.15s ease';
+  preenchimento.style.width = '0%';
+}
+
+btnRegistrar.addEventListener('pointerdown', iniciarSegurar);
+btnRegistrar.addEventListener('pointerup', cancelarSegurar);
+btnRegistrar.addEventListener('pointerleave', cancelarSegurar);
+btnRegistrar.addEventListener('pointercancel', cancelarSegurar);
 
 // ---------------------------------------------------------------------------
 // Lembrete simples: aviso na tela + notificação do navegador (enquanto a aba

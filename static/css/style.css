@@ -41,7 +41,7 @@ html, body {
 /* Topbar                                                                  */
 /* ---------------------------------------------------------------------- */
 .topbar {
-  background: var(--cor-texto);
+  background: linear-gradient(100deg, var(--cor-primaria-escura), var(--cor-primaria));
   color: white;
   padding: 14px 24px;
   display: flex;
@@ -66,8 +66,8 @@ html, body {
 .topbar-subtitulo {
   font-size: 12px;
   font-weight: 400;
-  color: #9ca3af;
-  border-left: 1px solid #374151;
+  color: rgba(255, 255, 255, 0.7);
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
   padding-left: 10px;
   margin-left: 2px;
 }
@@ -164,6 +164,54 @@ html, body {
 }
 
 .subnav-icon { font-size: 15px; }
+
+/* ---------------------------------------------------------------------- */
+/* Layout com sidebar (gestor, telas largas)                               */
+/* ---------------------------------------------------------------------- */
+.app-layout {
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 900px) {
+  .app-layout {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .subnav-gestor {
+    flex-direction: column;
+    width: 216px;
+    min-width: 216px;
+    border-bottom: none;
+    border-right: 1px solid var(--cor-borda);
+    padding: 18px 12px;
+    gap: 2px;
+    overflow-x: visible;
+  }
+
+  .subnav-gestor .subnav-link {
+    margin-right: 0;
+    padding: 10px 12px;
+    border-bottom: none;
+    border-radius: var(--raio-pequeno);
+  }
+
+  .subnav-gestor .subnav-link.active {
+    background: var(--cor-primaria-clara);
+    color: var(--cor-primaria);
+    border-bottom-color: transparent;
+  }
+
+  .subnav-gestor .subnav-link:hover:not(.active) {
+    background: var(--cor-fundo);
+  }
+
+  .app-layout .conteudo {
+    flex: 1;
+    min-width: 0;
+  }
+}
 
 .subnav-badge {
   display: inline-flex;
@@ -1001,6 +1049,14 @@ table a:hover { text-decoration: underline; }
   line-height: 1.1;
 }
 
+.ponto-clock sup {
+  font-size: 18px;
+  font-weight: 600;
+  opacity: 0.75;
+  margin-left: 2px;
+  top: -1.1em;
+}
+
 .ponto-data {
   margin-top: 6px;
   font-size: 14px;
@@ -1098,6 +1154,122 @@ table a:hover { text-decoration: underline; }
 }
 .resultado-msg.sucesso { color: var(--cor-sucesso); font-weight: 600; }
 .resultado-msg.erro { color: var(--cor-erro); font-weight: 600; }
+
+/* ---------------------------------------------------------------------- */
+/* Botão "segure para registrar"                                           */
+/* ---------------------------------------------------------------------- */
+.btn-segurar {
+  margin-top: 18px;
+  width: 100%;
+  height: 54px;
+  border-radius: 999px;
+  background: var(--cor-pendente);
+  color: white;
+  font-size: 15px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  box-shadow: var(--sombra-card);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.btn-segurar:not(:disabled) {
+  background: linear-gradient(135deg, var(--cor-sucesso), var(--cor-primaria));
+  cursor: pointer;
+}
+
+.btn-segurar:not(:disabled):hover {
+  box-shadow: var(--sombra-elevada);
+}
+
+.btn-segurar.segurando {
+  transform: scale(0.98);
+}
+
+.btn-segurar-preenchimento {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  background: rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.btn-segurar-texto {
+  position: relative;
+  z-index: 1;
+}
+
+.btn-segurar-instrucao {
+  text-align: center;
+  font-size: 12px;
+  color: var(--cor-texto-suave);
+  margin: 8px 0 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Marcações de hoje (chips)                                               */
+/* ---------------------------------------------------------------------- */
+.marcacoes-hoje summary {
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--cor-texto);
+  padding: 4px 0;
+  list-style: none;
+}
+.marcacoes-hoje summary::-webkit-details-marker { display: none; }
+.marcacoes-hoje summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+  color: var(--cor-texto-suave);
+}
+.marcacoes-hoje[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.marcacoes-contagem {
+  color: var(--cor-texto-suave);
+  font-weight: 500;
+}
+
+.chips-batidas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chip-batida {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--cor-fundo);
+  color: var(--cor-texto);
+}
+
+.chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.chip-entrada .chip-dot { background: var(--cor-sucesso); }
+.chip-saida .chip-dot { background: var(--cor-erro); }
 
 /* ---------------------------------------------------------------------- */
 /* Responsivo                                                              */

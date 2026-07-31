@@ -88,7 +88,14 @@
 <div class="card">
   <div class="card-header">
     <h2>Registros de Ponto</h2>
-    <a class="btn-secundario" href="{{ url_for('exportar_csv') }}" style="margin-top:0;">⬇ Exportar CSV</a>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      {% if registros_sem_endereco %}
+        <form method="POST" action="{{ url_for('preencher_enderecos') }}" style="margin:0;">
+          <button type="submit" class="btn-secundario" style="margin-top:0;">📍 Preencher {{ registros_sem_endereco }} endereço(s) faltando</button>
+        </form>
+      {% endif %}
+      <a class="btn-secundario" href="{{ url_for('exportar_csv') }}" style="margin-top:0;">⬇ Exportar CSV</a>
+    </div>
   </div>
   <div class="tabela-wrap">
     <table>

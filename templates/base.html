@@ -37,14 +37,10 @@
   <header class="topbar">
     <div class="topbar-brand">
       <span class="topbar-logo">
-        {% if marca.logo_header_base64 %}
-          <img src="{{ marca.logo_header_base64 }}" alt="{{ marca.nome_empresa }}">
-        {% else %}
-          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="12" cy="12" r="9" stroke="white" stroke-width="1.8"/>
-            <path d="M12 7.2v5l3.3 1.9" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        {% endif %}
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="9" stroke="white" stroke-width="1.8"/>
+          <path d="M12 7.2v5l3.3 1.9" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
       </span>
       <span>{{ marca.nome_empresa }}</span>
       <span class="topbar-subtitulo">Controle de Ponto</span>
@@ -60,8 +56,9 @@
     {% endif %}
   </header>
 
+  <div class="app-layout">
   {% if session.get('is_gestor') %}
-    <nav class="subnav">
+    <nav class="subnav subnav-gestor">
       <a class="subnav-link {% if request.endpoint == 'gestor_consulta' %}active{% endif %}" href="{{ url_for('gestor_consulta') }}">
         <span class="subnav-icon">📊</span> Dashboard
       </a>
@@ -102,6 +99,7 @@
 
     {% block conteudo %}{% endblock %}
   </main>
+  </div>
 
   <script>
     // Registra o service worker (necessário no iOS para notificações funcionarem

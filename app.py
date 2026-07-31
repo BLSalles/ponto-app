@@ -3,6 +3,7 @@ import io
 import csv
 import base64
 import json
+import time
 import numpy as np
 import requests
 from datetime import datetime, timedelta
@@ -296,7 +297,8 @@ def imagem_base64_para_encoding(imagem_base64):
 
 def obter_endereco(latitude, longitude):
     """Converte latitude/longitude em um endereço legível via geocodificação reversa (Nominatim/OpenStreetMap).
-    Retorna None se as coordenadas não vierem ou se a consulta falhar (sem quebrar o registro do ponto)."""
+    Retorna None se as coordenadas não vierem ou se a consulta falhar (sem quebrar o registro do ponto) —
+    mas SEMPRE imprime o motivo da falha no log, para dar pra diagnosticar pelo Render."""
     if latitude is None or longitude is None:
         return None
     try:
@@ -309,13 +311,24 @@ def obter_endereco(latitude, longitude):
                 "zoom": 18,
                 "addressdetails": 1,
             },
-            headers={"User-Agent": "controle-ponto-app/1.0"},
-            timeout=5,
+            headers={
+                # O Nominatim exige um User-Agent que identifique a aplicação (política de uso
+                # deles); sem isso as requisições podem ser bloqueadas silenciosamente.
+                "User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})",
+                "Accept-Language": "pt-BR",
+            },
+            timeout=8,
         )
-        resposta.raise_for_status()
+        if resposta.status_code != 200:
+            print(f"[endereco] Nominatim respondeu {resposta.status_code} para ({latitude}, {longitude}): {resposta.text[:200]}")
+            return None
         dados = resposta.json()
-        return dados.get("display_name")
-    except Exception:
+        endereco = dados.get("display_name")
+        if not endereco:
+            print(f"[endereco] Nominatim não retornou display_name para ({latitude}, {longitude}): {dados}")
+        return endereco
+    except Exception as ex:
+        print(f"[endereco] falha ao geocodificar ({latitude}, {longitude}): {ex}")
         return None
 
 
@@ -808,6 +821,10 @@ def gestor_consulta():
     horas_grafico = [f"{h:02d}:00" for h in range(6, 21)]
     contagem_grafico = [entradas_por_hora.get(h, 0) for h in range(6, 21)]
 
+    registros_sem_endereco = RegistroPonto.query.filter(
+        RegistroPonto.endereco.is_(None), RegistroPonto.latitude.isnot(None)
+    ).count()
+
     return render_template(
         "gestor_consulta.html",
         registros=registros,
@@ -821,6 +838,7 @@ def gestor_consulta():
         atrasados=atrasados,
         horas_grafico=horas_grafico,
         contagem_grafico=contagem_grafico,
+        registros_sem_endereco=registros_sem_endereco,
     )
 
 
@@ -1029,6 +1047,42 @@ def exportar_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=relatorio_ponto.csv"},
     )
+
+
+@app.route("/gestor/preencher-enderecos", methods=["POST"])
+@gestor_required
+def preencher_enderecos():
+    """Recupera o endereço de registros antigos que ficaram sem (ex.: por falha temporária
+    na geocodificação). Processa em lotes pequenos para respeitar o limite de 1 req/s do
+    Nominatim — clique de novo para continuar preenchendo o restante."""
+    pendentes = (
+        RegistroPonto.query
+        .filter(RegistroPonto.endereco.is_(None))
+        .filter(RegistroPonto.latitude.isnot(None))
+        .order_by(RegistroPonto.data_hora.desc())
+        .limit(30)
+        .all()
+    )
+
+    preenchidos = 0
+    for r in pendentes:
+        endereco = obter_endereco(r.latitude, r.longitude)
+        if endereco:
+            r.endereco = endereco
+            preenchidos += 1
+        time.sleep(1.1)  # respeita o limite de uso do Nominatim (~1 requisição/segundo)
+    db.session.commit()
+
+    restantes = RegistroPonto.query.filter(
+        RegistroPonto.endereco.is_(None), RegistroPonto.latitude.isnot(None)
+    ).count()
+
+    if restantes:
+        flash(f"{preenchidos} endereço(s) preenchido(s). Ainda restam {restantes} — clique novamente para continuar.")
+    else:
+        flash(f"{preenchidos} endereço(s) preenchido(s). Todos os registros já têm endereço.")
+
+    return redirect(url_for("gestor_consulta"))
 
 
 # ---------------------------------------------------------------------------
