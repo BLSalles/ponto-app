@@ -10,6 +10,11 @@
     <h1 class="saudacao-titulo">{{ saudacao }}, {{ nome.split(' ')[0] if nome else '' }} 👋</h1>
   </div>
 
+  <div class="banner-confirmacao" id="banner-confirmacao" style="display:none;">
+    <span id="banner-confirmacao-texto"></span>
+    <a href="{{ url_for('meus_registros') }}" class="banner-confirmacao-link">Visualizar</a>
+  </div>
+
   <div class="ponto-clock-card">
     <div class="ponto-clock-label">Horário de Brasília</div>
     <div class="ponto-clock">
@@ -26,18 +31,7 @@
 
   <div class="card ponto-card">
     <h2>Registrar Ponto</h2>
-    <p class="ponto-instrucao">Posicione seu rosto no quadro e confirme sua localização abaixo.</p>
-
-    <div class="camera-viewfinder" id="camera-viewfinder">
-      <video id="video" autoplay playsinline muted></video>
-      <canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
-      <span class="canto canto-tl"></span>
-      <span class="canto canto-tr"></span>
-      <span class="canto canto-bl"></span>
-      <span class="canto canto-br"></span>
-      <div class="linha-scan" id="linha-scan"></div>
-      <div class="pill-resultado" id="pill-resultado"></div>
-    </div>
+    <p class="ponto-instrucao">Confirme sua localização e mantenha o botão pressionado para escanear seu rosto.</p>
 
     <div class="mapa-card">
       <div id="mapa-local" class="mapa-local"></div>
@@ -83,22 +77,51 @@
       </div>
     </div>
 
-    <details class="marcacoes-hoje" {% if registros_hoje_lista %}open{% endif %}>
-      <summary>Marcações de hoje <span class="marcacoes-contagem">({{ registros_hoje_lista|length }})</span></summary>
-      {% if registros_hoje_lista %}
-        <div class="chips-batidas">
-          {% for r in registros_hoje_lista|sort(attribute='data_hora') %}
-            <span class="chip-batida {{ 'chip-saida' if r.tipo == 'saida' else 'chip-entrada' }}">
-              <span class="chip-dot"></span>{{ r.data_hora | brasilia('%H:%M') }}
-            </span>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="vazio">Nenhuma batida registrada ainda hoje.</p>
+    <details class="marcacoes-hoje" id="marcacoes-hoje" {% if registros_hoje_lista %}open{% endif %}>
+      <summary>Marcações de hoje <span class="marcacoes-contagem" id="marcacoes-contagem">({{ registros_hoje_lista|length }})</span></summary>
+      <div class="chips-batidas" id="chips-batidas">
+        {% for r in registros_hoje_lista|sort(attribute='data_hora') %}
+          <span class="chip-batida {{ 'chip-saida' if r.tipo == 'saida' else 'chip-entrada' }}">
+            <span class="chip-dot"></span>{{ r.data_hora | brasilia('%H:%M') }}
+          </span>
+        {% endfor %}
+      </div>
+      {% if not registros_hoje_lista %}
+        <p class="vazio" id="marcacoes-vazio">Nenhuma batida registrada ainda hoje.</p>
       {% endif %}
     </details>
   </div>
 </div>
+
+<!-- Modal de reconhecimento facial — só aparece na hora de registrar o ponto -->
+<div class="modal-facial" id="modal-facial">
+  <div class="modal-facial-caixa">
+    <div class="modal-facial-topo">
+      <span>Reconhecimento facial</span>
+      <button type="button" class="modal-facial-fechar-x" id="modal-fechar-x" aria-label="Fechar">✕</button>
+    </div>
+
+    <div class="oval-camera">
+      <video id="video-modal" autoplay playsinline muted></video>
+      <div class="oval-anel"></div>
+      <div class="check-badge" id="check-badge">
+        <svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <p class="modal-facial-status" id="modal-facial-status">Posicione seu rosto no quadro</p>
+
+    <div class="modal-facial-controles">
+      <button type="button" class="modal-controle-btn" id="btn-flash" title="Lanterna" style="visibility:hidden;">🔦</button>
+      <button type="button" class="modal-fechar-pill" id="modal-fechar-pill">✕ Fechar</button>
+      <button type="button" class="modal-controle-btn" id="btn-trocar-camera" title="Trocar câmera">🔄</button>
+    </div>
+  </div>
+</div>
+
+<canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -117,20 +140,10 @@ setInterval(atualizarRelogio, 1000);
 
 let latitude = null;
 let longitude = null;
-const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const btnRegistrar = document.getElementById('btn-registrar');
 const resultado = document.getElementById('resultado');
 const enderecoTexto = document.getElementById('endereco-texto');
-const pillResultado = document.getElementById('pill-resultado');
-
-// Câmera
-navigator.mediaDevices.getUserMedia({ video: true })
-  .then(stream => { video.srcObject = stream; })
-  .catch(() => {
-    resultado.textContent = 'Não foi possível acessar a câmera.';
-    resultado.className = 'resultado-msg erro';
-  });
 
 // ---------------------------------------------------------------------------
 // Mapa de confirmação (Leaflet + OpenStreetMap) — mostra pro colaborador ONDE
@@ -139,15 +152,12 @@ navigator.mediaDevices.getUserMedia({ video: true })
 // a confiabilidade do registro.
 // ---------------------------------------------------------------------------
 let mapa = null;
-let marcador = null;
 
 function iniciarMapa(lat, lon) {
   if (mapa) return;
   mapa = L.map('mapa-local', { zoomControl: false, attributionControl: false }).setView([lat, lon], 17);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-  }).addTo(mapa);
-  marcador = L.marker([lat, lon]).addTo(mapa);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(mapa);
+  L.marker([lat, lon]).addTo(mapa);
 }
 
 if (navigator.geolocation) {
@@ -182,23 +192,119 @@ if (navigator.geolocation) {
 
 let registrosHojeCount = {{ registros_hoje_count }};
 
-function mostrarPill(texto, sucesso) {
-  pillResultado.textContent = (sucesso ? '✅ ' : '⚠️ ') + texto;
-  pillResultado.className = 'pill-resultado mostrar' + (sucesso ? '' : ' pill-erro');
-  setTimeout(() => {
-    pillResultado.className = 'pill-resultado';
-  }, 4000);
+// ---------------------------------------------------------------------------
+// Modal de reconhecimento facial
+// ---------------------------------------------------------------------------
+const modalFacial = document.getElementById('modal-facial');
+const videoModal = document.getElementById('video-modal');
+const statusModal = document.getElementById('modal-facial-status');
+const checkBadge = document.getElementById('check-badge');
+const checkBadgeIcone = document.getElementById('check-badge-icone');
+const btnFecharX = document.getElementById('modal-fechar-x');
+const btnFecharPill = document.getElementById('modal-fechar-pill');
+const btnTrocarCamera = document.getElementById('btn-trocar-camera');
+const btnFlash = document.getElementById('btn-flash');
+const bannerConfirmacao = document.getElementById('banner-confirmacao');
+const bannerConfirmacaoTexto = document.getElementById('banner-confirmacao-texto');
+
+let streamAtual = null;
+let facingModeAtual = 'user';
+let trilhaVideoAtual = null;
+let torchLigado = false;
+
+const iconeCheck = '<path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+const iconeErro = '<path d="M6 6l12 12M18 6L6 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+
+function abrirCameraModal(facingMode) {
+  return navigator.mediaDevices.getUserMedia({ video: { facingMode } })
+    .then(stream => {
+      streamAtual = stream;
+      trilhaVideoAtual = stream.getVideoTracks()[0];
+      videoModal.srcObject = stream;
+
+      // Lanterna (torch): só existe em alguns Androids com câmera traseira.
+      const capacidades = trilhaVideoAtual.getCapabilities ? trilhaVideoAtual.getCapabilities() : {};
+      btnFlash.style.visibility = capacidades.torch ? 'visible' : 'hidden';
+      torchLigado = false;
+    });
+}
+
+function abrirModalFacial() {
+  statusModal.textContent = 'Posicione seu rosto no quadro';
+  checkBadge.className = 'check-badge';
+  modalFacial.classList.add('mostrar');
+
+  abrirCameraModal(facingModeAtual)
+    .then(() => {
+      // Pequena espera para o vídeo estabilizar antes de capturar o quadro.
+      setTimeout(() => {
+        statusModal.textContent = 'Verificando...';
+        executarRegistro();
+      }, 700);
+    })
+    .catch(() => {
+      statusModal.textContent = 'Não foi possível acessar a câmera.';
+      setTimeout(fecharModalFacial, 1800);
+    });
+}
+
+function fecharModalFacial() {
+  modalFacial.classList.remove('mostrar');
+  if (streamAtual) {
+    streamAtual.getTracks().forEach(t => t.stop());
+    streamAtual = null;
+  }
+}
+
+function trocarCamera() {
+  facingModeAtual = facingModeAtual === 'user' ? 'environment' : 'user';
+  if (streamAtual) {
+    streamAtual.getTracks().forEach(t => t.stop());
+  }
+  abrirCameraModal(facingModeAtual).catch(() => {
+    statusModal.textContent = 'Não foi possível trocar de câmera.';
+  });
+}
+
+btnFecharX.addEventListener('click', () => { cancelarSegurar(); fecharModalFacial(); });
+btnFecharPill.addEventListener('click', () => { cancelarSegurar(); fecharModalFacial(); });
+btnTrocarCamera.addEventListener('click', trocarCamera);
+
+btnFlash.addEventListener('click', () => {
+  if (!trilhaVideoAtual) return;
+  torchLigado = !torchLigado;
+  trilhaVideoAtual.applyConstraints({ advanced: [{ torch: torchLigado }] }).catch(() => {});
+});
+
+function mostrarBannerConfirmacao(texto) {
+  bannerConfirmacaoTexto.textContent = texto;
+  bannerConfirmacao.style.display = 'flex';
+  clearTimeout(window._timeoutBannerConfirmacao);
+  window._timeoutBannerConfirmacao = setTimeout(() => {
+    bannerConfirmacao.style.display = 'none';
+  }, 10000);
+}
+
+function atualizarMarcacoesHoje(tipo, horaLocal) {
+  const container = document.getElementById('chips-batidas');
+  const vazio = document.getElementById('marcacoes-vazio');
+  if (vazio) vazio.remove();
+
+  const chip = document.createElement('span');
+  chip.className = 'chip-batida ' + (tipo === 'saida' ? 'chip-saida' : 'chip-entrada');
+  chip.innerHTML = '<span class="chip-dot"></span>' + horaLocal;
+  container.appendChild(chip);
+
+  const contagem = document.getElementById('marcacoes-contagem');
+  const total = container.querySelectorAll('.chip-batida').length;
+  contagem.textContent = '(' + total + ')';
+  document.getElementById('marcacoes-hoje').open = true;
 }
 
 function executarRegistro() {
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(videoModal, 0, 0, canvas.width, canvas.height);
   const foto = canvas.toDataURL('image/jpeg', 0.8);
-
-  btnRegistrar.disabled = true;
-  resultado.className = 'resultado-msg';
-  resultado.textContent = 'Registrando...';
-  document.getElementById('camera-viewfinder').classList.add('escaneando');
 
   fetch('/api/registrar-ponto', {
     method: 'POST',
@@ -209,31 +315,38 @@ function executarRegistro() {
     .then(data => {
       resultado.textContent = data.mensagem;
       resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
-      btnRegistrar.disabled = false;
-      document.getElementById('camera-viewfinder').classList.remove('escaneando');
+
+      checkBadgeIcone.outerHTML = data.ok
+        ? '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeCheck + '</svg>'
+        : '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
+      checkBadge.className = 'check-badge mostrar' + (data.ok ? '' : ' check-badge-erro');
 
       const rotuloTipo = data.tipo === 'saida' ? 'Saída registrada' : 'Entrada registrada';
-      mostrarPill(data.ok ? rotuloTipo : 'Não foi possível registrar', data.ok);
+      statusModal.textContent = data.ok ? rotuloTipo + '!' : 'Não foi possível registrar';
 
       if (data.ok) {
         registrosHojeCount = data.registros_hoje_count;
-        proximoLembreteEm = 0; // permite lembrete imediato de novo se a próxima pendência já valer a pena
+        proximoLembreteEm = 0;
         verificarLembrete();
+        atualizarMarcacoesHoje(data.tipo, data.horario ? data.horario.slice(0, 5) : '');
+        mostrarBannerConfirmacao('✅ ' + rotuloTipo + ' às ' + (data.horario || '') + ' em ' + (data.data || '') + '.');
       }
+
+      setTimeout(fecharModalFacial, data.ok ? 1300 : 1800);
     })
     .catch(() => {
       resultado.textContent = 'Erro ao registrar o ponto.';
       resultado.className = 'resultado-msg erro';
-      btnRegistrar.disabled = false;
-      document.getElementById('camera-viewfinder').classList.remove('escaneando');
-      mostrarPill('Erro ao registrar', false);
+      checkBadgeIcone.outerHTML = '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
+      checkBadge.className = 'check-badge mostrar check-badge-erro';
+      statusModal.textContent = 'Erro ao registrar o ponto.';
+      setTimeout(fecharModalFacial, 1800);
     });
 }
 
 // ---------------------------------------------------------------------------
-// Botão "segure para registrar" — exige pressionar por ~700ms antes de
-// confirmar. Evita toques acidentais (é mais fácil apertar sem querer um
-// botão simples do que manter pressionado por quase 1 segundo de propósito).
+// Botão "segure para registrar" — exige pressionar por ~700ms antes de abrir
+// o reconhecimento facial. Evita toques acidentais.
 // ---------------------------------------------------------------------------
 const DURACAO_SEGURAR_MS = 700;
 const preenchimento = document.getElementById('btn-segurar-preenchimento');
@@ -249,7 +362,7 @@ function iniciarSegurar(e) {
     btnRegistrar.classList.remove('segurando');
     preenchimento.style.transition = 'none';
     preenchimento.style.width = '0%';
-    executarRegistro();
+    abrirModalFacial();
   }, DURACAO_SEGURAR_MS);
 }
 
@@ -284,23 +397,19 @@ const btnLembrete = document.getElementById('btn-lembrete');
 const avisoIOS = document.getElementById('aviso-ios');
 const bannerLembrete = document.getElementById('banner-lembrete');
 const bannerLembreteTexto = document.getElementById('banner-lembrete-texto');
-let proximoLembreteEm = 0; // timestamp (Date.now()) em que o próximo lembrete pode disparar
+let proximoLembreteEm = 0;
 
 const ehIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 const rodandoInstalado = window.navigator.standalone === true
   || window.matchMedia('(display-mode: standalone)').matches;
 
 if (!('Notification' in window)) {
-  // iOS Safari não expõe a API de notificação em abas normais — só funciona
-  // quando o site é instalado na Tela de Início.
   btnLembrete.style.display = 'none';
   if (ehIOS && !rodandoInstalado) {
     avisoIOS.style.display = 'block';
     avisoIOS.innerHTML = '📱 Para receber lembretes no iPhone: toque em <strong>Compartilhar</strong> (ícone de quadrado com seta) → <strong>Adicionar à Tela de Início</strong>. Depois abra o app pelo ícone criado (não pelo Safari).';
   }
 } else if (ehIOS && !rodandoInstalado) {
-  // Tem a API mas está rodando dentro do Safari normal (não instalado) — no iOS
-  // isso normalmente não entrega notificações de forma confiável.
   avisoIOS.style.display = 'block';
   avisoIOS.innerHTML = '📱 Para os lembretes funcionarem de forma confiável no iPhone, adicione este app à Tela de Início: toque em <strong>Compartilhar</strong> → <strong>Adicionar à Tela de Início</strong> e abra por lá.';
 }
@@ -312,17 +421,10 @@ btnLembrete.addEventListener('click', () => {
     btnLembrete.textContent = '🔔 Lembretes ativados';
     btnLembrete.disabled = true;
     dispararNotificacao('Você será avisado se esquecer de bater o ponto.');
-
-    // Também inscreve para Web Push de verdade (funciona mesmo com o app fechado).
     inscreverPushReal();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Web Push real: entrega o lembrete mesmo com o app fechado, enviado pelo
-// servidor (agendador rodando no Flask). Só ativa se o gestor já tiver
-// configurado as chaves VAPID no servidor.
-// ---------------------------------------------------------------------------
 const PUSH_HABILITADO = {{ 'true' if push_habilitado else 'false' }};
 const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
 
@@ -355,13 +457,9 @@ function inscreverPushReal() {
         body: JSON.stringify(sub),
       });
     })
-    .catch(() => {
-      // Se a inscrição falhar, os lembretes locais (enquanto a aba está aberta) continuam funcionando.
-    });
+    .catch(() => {});
 }
 
-// Se o navegador já tinha permissão concedida em uma visita anterior, garante
-// que a inscrição push também já esteja ativa (sem precisar clicar de novo).
 if ('Notification' in window && Notification.permission === 'granted') {
   btnLembrete.textContent = '🔔 Lembretes ativados';
   btnLembrete.disabled = true;
@@ -371,8 +469,6 @@ if ('Notification' in window && Notification.permission === 'granted') {
 function dispararNotificacao(texto) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
 
-  // Usa o service worker sempre que possível — é o único jeito que funciona no iOS,
-  // e também funciona normalmente no Android/desktop.
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.ready.then(reg => {
       reg.showNotification('Lembrete de ponto', {
@@ -394,7 +490,7 @@ function verificarLembrete() {
     timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false
   }).format(agora);
 
-  let pendencia = null; // 'entrada' | 'saida' | null
+  let pendencia = null;
 
   if (registrosHojeCount === 0 && horaAtualStr >= HORARIO_ENTRADA) {
     pendencia = 'entrada';

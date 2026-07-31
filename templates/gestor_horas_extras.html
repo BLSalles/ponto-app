@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block titulo %}Horas Extras - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Horas Extras</h2>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    Hora extra = tempo trabalhado no dia menos a duração padrão da jornada
+    (<strong>{{ horario_entrada }}</strong> às <strong>{{ horario_saida }}</strong>, definida em
+    <a href="{{ url_for('gestor_configuracoes') }}">Configurações</a>). Um atraso na entrada reduz
+    naturalmente a hora extra feita na saída — é o total trabalhado no dia comparado à jornada padrão.
+  </p>
+
+  <form method="GET" action="{{ url_for('gestor_horas_extras') }}" class="filtro-mes-form">
+    <label>Mês</label>
+    <input type="month" name="mes" value="{{ mes_selecionado }}" onchange="this.form.submit()">
+    <a class="btn-secundario" href="{{ url_for('exportar_csv_horas_extras', mes=mes_selecionado) }}" style="margin-top:0;">⬇ Exportar CSV</a>
+  </form>
+</div>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <span class="stat-valor">{{ total_extra_empresa | horas }}</span>
+    <span class="stat-label">Total de horas extras — {{ nome_mes }}</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-valor">{{ resumo_colaboradores | selectattr('total_extra', 'gt', 0) | list | length }}</span>
+    <span class="stat-label">Colaboradores com hora extra</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <h2>Por colaborador</h2>
+  </div>
+
+  {% if resumo_colaboradores %}
+    <div class="lista-horas-extras">
+      {% for r in resumo_colaboradores %}
+        <details class="extra-colaborador {% if r.total_extra == 0 %}extra-zerada{% endif %}">
+          <summary>
+            <span class="colaborador-avatar">{{ r.colaborador.nome[0]|upper }}</span>
+            <span class="extra-colaborador-info">
+              <span class="colaborador-nome">{{ r.colaborador.nome }}</span>
+              <span class="colaborador-email">{{ r.total_horas_mes | horas }} trabalhadas no mês</span>
+            </span>
+            <span class="extra-colaborador-valor {% if r.total_extra > 0 %}extra-valor-destaque{% endif %}">
+              {{ r.total_extra | horas }}
+            </span>
+          </summary>
+
+          {% if r.dias_com_extra %}
+            <div class="extra-dias-lista">
+              {% for dia in r.dias_com_extra %}
+                <div class="extra-dia-item">
+                  <span>{{ dia.data.strftime('%d/%m/%Y (%A)') }}</span>
+                  <span class="extra-dia-valores">
+                    <span class="extra-dia-total">{{ dia.total_horas }} no dia</span>
+                    <span class="badge badge-alerta">+{{ dia.horas_extras | horas }}</span>
+                  </span>
+                </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="vazio">Nenhuma hora extra neste mês.</p>
+          {% endif %}
+        </details>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="vazio">Nenhum colaborador cadastrado ainda.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

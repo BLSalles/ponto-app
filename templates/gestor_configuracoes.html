@@ -7,10 +7,10 @@
     <h2>Marca e Aparência</h2>
   </div>
   <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
-    Personalize o nome da empresa, a logo (exibida na tela de login) e as cores do sistema.
-    O cabeçalho do app mantém o ícone padrão de relógio. As mudanças aparecem para todos
-    os colaboradores imediatamente — cada empresa que usar o SmartPoint pode deixar com a
-    própria identidade visual.
+    Personalize o nome da empresa, as logos e as cores do sistema. Você pode usar uma logo
+    diferente na tela de login e outra (mais compacta) no cabeçalho do app — ou deixar
+    qualquer uma delas no ícone padrão de relógio. As mudanças aparecem para todos os
+    colaboradores imediatamente.
   </p>
 
   <form method="POST" action="{{ url_for('salvar_marca') }}" enctype="multipart/form-data">
@@ -19,8 +19,8 @@
 
     <div class="marca-logo-linha">
       <div class="marca-logo-preview">
-        {% if marca.logo_header_base64 %}
-          <img src="{{ marca.logo_header_base64 }}" alt="Logo atual">
+        {% if marca.logo_login_base64 %}
+          <img src="{{ marca.logo_login_base64 }}" alt="Logo do login atual">
         {% else %}
           <svg viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
             <circle cx="12" cy="12" r="9.2" stroke="#9ca3af" stroke-width="1.6"/>
@@ -29,14 +29,31 @@
         {% endif %}
       </div>
       <div class="marca-logo-campo">
-        <label>Logo (PNG ou JPG — fundo transparente fica melhor)</label>
-        <input type="file" name="logo" accept="image/png, image/jpeg">
+        <label>Logo da tela de login (PNG ou JPG — fundo transparente fica melhor)</label>
+        <input type="file" name="logo_login" accept="image/png, image/jpeg">
+      </div>
+    </div>
+
+    <div class="marca-logo-linha" style="margin-top:12px;">
+      <div class="marca-logo-preview">
+        {% if marca.logo_topbar_base64 %}
+          <img src="{{ marca.logo_topbar_base64 }}" alt="Logo do cabeçalho atual">
+        {% else %}
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="12" cy="12" r="9.2" stroke="#9ca3af" stroke-width="1.6"/>
+            <path d="M12 7v5l3.3 1.9" stroke="#9ca3af" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        {% endif %}
+      </div>
+      <div class="marca-logo-campo">
+        <label>Logo do cabeçalho (aparece pequena no topo do app e vira o ícone do PWA)</label>
+        <input type="file" name="logo_topbar" accept="image/png, image/jpeg">
       </div>
     </div>
 
     <div class="form-grid" style="margin-top:14px;">
       <div class="form-campo">
-        <label>Cor primária</label>
+        <label>Cor primária (cabeçalho e botões)</label>
         <div class="cor-campo">
           <input type="color" name="cor_primaria" value="{{ marca.cor_primaria }}" oninput="this.nextElementSibling.textContent = this.value">
           <span>{{ marca.cor_primaria }}</span>
@@ -54,11 +71,18 @@
     <button type="submit" class="btn-primario">Salvar marca</button>
   </form>
 
-  {% if marca.logo_header_base64 %}
-    <form method="POST" action="{{ url_for('remover_logo_marca') }}" style="margin-top:8px;">
-      <button type="submit" class="btn-secundario">Remover logo (voltar ao ícone padrão)</button>
-    </form>
-  {% endif %}
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+    {% if marca.logo_login_base64 %}
+      <form method="POST" action="{{ url_for('remover_logo_login') }}">
+        <button type="submit" class="btn-secundario">Remover logo do login</button>
+      </form>
+    {% endif %}
+    {% if marca.logo_topbar_base64 %}
+      <form method="POST" action="{{ url_for('remover_logo_topbar') }}">
+        <button type="submit" class="btn-secundario">Remover logo do cabeçalho</button>
+      </form>
+    {% endif %}
+  </div>
 </div>
 
 <div class="card {% if push_habilitado %}card-sucesso{% else %}card-aviso{% endif %}">

@@ -2,6 +2,15 @@
 {% block titulo %}Meus Registros{% endblock %}
 {% block conteudo %}
 
+{% if total_extra_mes and total_extra_mes > 0 %}
+<div class="stats-grid">
+  <div class="stat-card stat-sucesso">
+    <span class="stat-valor">{{ total_extra_mes | horas }}</span>
+    <span class="stat-label">Horas extras este mês</span>
+  </div>
+</div>
+{% endif %}
+
 <div class="card">
   <div class="card-header">
     <h2>Resumo por dia</h2>
@@ -15,10 +24,15 @@
             <span class="colaborador-email">
               {{ dia.batidas | length }} batida{{ 's' if dia.batidas|length != 1 else '' }}
               — total estimado: {{ dia.total_horas }}
+              {% if dia.horas_extras and dia.horas_extras > 0 %}
+                · +{{ dia.horas_extras | horas }} extra
+              {% endif %}
             </span>
           </div>
           {% if dia.incompleto %}
             <span class="badge badge-alerta">Incompleto</span>
+          {% elif dia.horas_extras and dia.horas_extras > 0 %}
+            <span class="badge badge-alerta">+{{ dia.horas_extras | horas }}</span>
           {% else %}
             <span class="badge badge-ok">Completo</span>
           {% endif %}

@@ -6,7 +6,7 @@ import json
 import time
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from functools import wraps
 from pywebpush import webpush, WebPushException
@@ -158,15 +158,20 @@ def obter_configuracao():
 
 class ConfiguracaoMarca(db.Model):
     """Configuração de marca (white-label): permite que cada gestor personalize o
-    nome da empresa, a logo e as cores do sistema — feito para o app ser vendido
+    nome da empresa, as logos e as cores do sistema — feito para o app ser vendido
     e reaproveitado por diferentes clientes/empresas."""
     id = db.Column(db.Integer, primary_key=True)
     nome_empresa = db.Column(db.String(60), default="SmartPoint")
-    logo_header_base64 = db.Column(db.Text, nullable=True)   # logo para o cabeçalho/login
-    icone_192_base64 = db.Column(db.Text, nullable=True)     # ícone PWA 192x192
+    logo_login_base64 = db.Column(db.Text, nullable=True)    # logo grande, só na tela de login
+    logo_topbar_base64 = db.Column(db.Text, nullable=True)   # logo pequena, no cabeçalho do app
+    icone_192_base64 = db.Column(db.Text, nullable=True)     # ícone PWA 192x192 (gerado a partir da logo do cabeçalho)
     icone_512_base64 = db.Column(db.Text, nullable=True)     # ícone PWA 512x512
     cor_primaria = db.Column(db.String(7), default="#0f5fa8")
     cor_secundaria = db.Column(db.String(7), default="#17b26a")
+
+    # Nome de coluna antigo (mantido só para compatibilidade com bancos já existentes,
+    # onde a logo enviada antes virava tanto login quanto cabeçalho ao mesmo tempo).
+    logo_header_base64 = db.Column(db.Text, nullable=True)
 
 
 def obter_marca():
@@ -176,25 +181,36 @@ def obter_marca():
         marca = ConfiguracaoMarca()
         db.session.add(marca)
         db.session.commit()
+    elif marca.logo_header_base64 and not marca.logo_login_base64:
+        # Compatibilidade: em versões antigas, a única logo enviada virava a do login.
+        marca.logo_login_base64 = marca.logo_header_base64
+        db.session.commit()
     return marca
 
 
-def processar_logo_upload(arquivo_bytes):
-    """Recebe os bytes de uma imagem enviada pelo gestor e devolve 3 data-URIs (base64)
-    prontas para salvar no banco: logo para cabeçalho, ícone 192px e ícone 512px."""
+def redimensionar_para_base64(arquivo_bytes, altura_max):
+    """Redimensiona uma imagem (mantendo a proporção) para uma altura máxima em px
+    e devolve um data-URI PNG pronto para salvar no banco."""
+    from PIL import Image
+    import io as _io
+
+    img = Image.open(_io.BytesIO(arquivo_bytes)).convert("RGBA")
+    if img.height > altura_max:
+        proporcao = altura_max / img.height
+        img = img.resize((max(1, int(img.width * proporcao)), altura_max), Image.LANCZOS)
+    buf = _io.BytesIO()
+    img.save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def gerar_icones_pwa(arquivo_bytes):
+    """Gera as duas variantes quadradas (192px/512px, fundo branco) usadas como
+    ícone do PWA / Tela de Início, a partir da imagem enviada para o cabeçalho."""
     from PIL import Image
     import io as _io
 
     img = Image.open(_io.BytesIO(arquivo_bytes)).convert("RGBA")
 
-    # Logo do cabeçalho: mantém a proporção original, altura fixa de 160px.
-    proporcao = 160 / img.height
-    header_img = img.resize((max(1, int(img.width * proporcao)), 160), Image.LANCZOS)
-    buf_header = _io.BytesIO()
-    header_img.save(buf_header, "PNG")
-    logo_header_b64 = "data:image/png;base64," + base64.b64encode(buf_header.getvalue()).decode()
-
-    # Ícones quadrados (PWA / ícone da Tela de Início): centraliza em fundo branco.
     def _icone_quadrado(tamanho):
         lado = max(img.width, img.height)
         fundo = Image.new("RGBA", (lado, lado), (255, 255, 255, 255))
@@ -205,10 +221,8 @@ def processar_logo_upload(arquivo_bytes):
         fundo.save(buf, "PNG")
         return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
-    icone_192_b64 = _icone_quadrado(192)
-    icone_512_b64 = _icone_quadrado(512)
+    return _icone_quadrado(192), _icone_quadrado(512)
 
-    return logo_header_b64, icone_192_b64, icone_512_b64
 
 
 @app.template_filter("escurecer")
@@ -381,6 +395,48 @@ def montar_resumo_diario(registros):
             "incompleto": len(horarios) % 2 != 0,
         })
     return resumo
+
+
+def _horario_para_decimal(hhmm):
+    """Converte 'HH:MM' em horas decimais (ex.: '08:30' -> 8.5)."""
+    h, m = hhmm.split(":")
+    return int(h) + int(m) / 60
+
+
+def calcular_horas_extras_dia(total_horas_decimal, horario_entrada_padrao, horario_saida_padrao):
+    """Calcula a hora extra do dia.
+
+    Regra: hora extra = (horas realmente trabalhadas no dia) - (duração padrão da
+    jornada, ou seja, horário de saída padrão menos horário de entrada padrão).
+
+    Isso já cobre naturalmente os dois cenários que a jornada padrão (8h às 18h,
+    10h de duração) costuma gerar:
+    - Entrou 8h, saiu 19h -> trabalhou 11h -> 11h - 10h = 1h de hora extra.
+    - Entrou 8h30, saiu 19h -> trabalhou 10h30 -> 10h30 - 10h = 30min de hora extra
+      (o atraso na entrada "consome" parte da hora extra feita na saída).
+
+    Se o resultado for negativo (trabalhou menos que a jornada padrão), a hora
+    extra é zero — não vira "hora extra negativa" aqui, é só ausência de extra.
+    """
+    duracao_padrao = _horario_para_decimal(horario_saida_padrao) - _horario_para_decimal(horario_entrada_padrao)
+    if duracao_padrao <= 0:
+        duracao_padrao = 8.0  # salvaguarda, não deveria acontecer com horários válidos
+    extra = total_horas_decimal - duracao_padrao
+    return max(0.0, round(extra, 2))
+
+
+@app.template_filter("horas")
+def formatar_horas(horas_decimal):
+    """Formata horas decimais de um jeito fácil de ler: '1h30min', '45min', '2h'."""
+    total_minutos = int(round(horas_decimal * 60))
+    if total_minutos <= 0:
+        return "0min"
+    h, m = divmod(total_minutos, 60)
+    if h and m:
+        return f"{h}h{m:02d}min"
+    if h:
+        return f"{h}h"
+    return f"{m}min"
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +771,16 @@ def meus_registros():
     )
     resumo_diario = montar_resumo_diario(registros)
 
+    config = obter_configuracao()
+    hoje = agora_brasilia().date()
+    total_extra_mes = 0.0
+    for dia in resumo_diario:
+        dia["horas_extras"] = calcular_horas_extras_dia(
+            dia["total_horas_decimal"], config.horario_entrada, config.horario_saida
+        )
+        if dia["data"].year == hoje.year and dia["data"].month == hoje.month:
+            total_extra_mes += dia["horas_extras"]
+
     solicitacoes = (
         SolicitacaoAjuste.query
         .filter_by(colaborador_id=user.id)
@@ -728,7 +794,8 @@ def meus_registros():
         registros=registros,
         resumo_diario=resumo_diario,
         solicitacoes=solicitacoes,
-        hoje=agora_brasilia().date(),
+        hoje=hoje,
+        total_extra_mes=round(total_extra_mes, 2),
     )
 
 
@@ -859,8 +926,8 @@ def gestor_configuracoes():
 @app.route("/gestor/configuracoes/marca", methods=["POST"])
 @gestor_required
 def salvar_marca():
-    """Permite ao gestor personalizar o nome da empresa, a logo e as cores do
-    sistema (white-label) — cada empresa que usar o app pode deixar com a própria cara."""
+    """Permite ao gestor personalizar o nome da empresa, as logos (login e cabeçalho,
+    de forma independente) e as cores do sistema (white-label)."""
     import re
 
     marca = obter_marca()
@@ -868,7 +935,8 @@ def salvar_marca():
     nome_empresa = request.form.get("nome_empresa", "").strip()
     cor_primaria = request.form.get("cor_primaria", "").strip()
     cor_secundaria = request.form.get("cor_secundaria", "").strip()
-    arquivo_logo = request.files.get("logo")
+    arquivo_login = request.files.get("logo_login")
+    arquivo_topbar = request.files.get("logo_topbar")
 
     def _valida_hex(cor):
         return bool(re.fullmatch(r"#[0-9a-fA-F]{6}", cor or ""))
@@ -880,33 +948,52 @@ def salvar_marca():
     if _valida_hex(cor_secundaria):
         marca.cor_secundaria = cor_secundaria
 
-    if arquivo_logo and arquivo_logo.filename:
+    if arquivo_login and arquivo_login.filename:
         try:
-            dados = arquivo_logo.read()
+            dados = arquivo_login.read()
             if len(dados) > 3 * 1024 * 1024:
-                flash("A imagem enviada é muito grande (máximo 3MB). Tente uma imagem menor.")
+                flash("A logo da tela de login é muito grande (máximo 3MB).")
             else:
-                logo_header, icone_192, icone_512 = processar_logo_upload(dados)
-                marca.logo_header_base64 = logo_header
-                marca.icone_192_base64 = icone_192
-                marca.icone_512_base64 = icone_512
+                marca.logo_login_base64 = redimensionar_para_base64(dados, altura_max=160)
         except Exception:
-            flash("Não foi possível processar a imagem enviada. Tente um arquivo PNG ou JPG.")
+            flash("Não foi possível processar a logo da tela de login. Tente um arquivo PNG ou JPG.")
+
+    if arquivo_topbar and arquivo_topbar.filename:
+        try:
+            dados = arquivo_topbar.read()
+            if len(dados) > 3 * 1024 * 1024:
+                flash("A logo do cabeçalho é muito grande (máximo 3MB).")
+            else:
+                marca.logo_topbar_base64 = redimensionar_para_base64(dados, altura_max=64)
+                marca.icone_192_base64, marca.icone_512_base64 = gerar_icones_pwa(dados)
+        except Exception:
+            flash("Não foi possível processar a logo do cabeçalho. Tente um arquivo PNG ou JPG.")
 
     db.session.commit()
     flash("Marca do sistema atualizada com sucesso.")
     return redirect(url_for("gestor_configuracoes"))
 
 
-@app.route("/gestor/configuracoes/marca/remover-logo", methods=["POST"])
+@app.route("/gestor/configuracoes/marca/remover-logo-login", methods=["POST"])
 @gestor_required
-def remover_logo_marca():
+def remover_logo_login():
     marca = obter_marca()
-    marca.logo_header_base64 = None
+    marca.logo_login_base64 = None
+    marca.logo_header_base64 = None  # compatibilidade com registros antigos
+    db.session.commit()
+    flash("Logo da tela de login removida.")
+    return redirect(url_for("gestor_configuracoes"))
+
+
+@app.route("/gestor/configuracoes/marca/remover-logo-topbar", methods=["POST"])
+@gestor_required
+def remover_logo_topbar():
+    marca = obter_marca()
+    marca.logo_topbar_base64 = None
     marca.icone_192_base64 = None
     marca.icone_512_base64 = None
     db.session.commit()
-    flash("Logo removida — voltando para o ícone padrão.")
+    flash("Logo do cabeçalho removida — voltando para o ícone padrão de relógio.")
     return redirect(url_for("gestor_configuracoes"))
 
 
@@ -1086,8 +1173,114 @@ def preencher_enderecos():
 
 
 # ---------------------------------------------------------------------------
-# Rotas - gestor: solicitações de ajuste de ponto
+# Rotas - gestor: relatório de horas extras
 # ---------------------------------------------------------------------------
+def _calcular_relatorio_horas_extras(ano, mes):
+    """Monta o relatório de horas extras do mês para todos os colaboradores."""
+    config = obter_configuracao()
+
+    primeiro_dia = date(ano, mes, 1)
+    proximo_mes = date(ano + 1, 1, 1) if mes == 12 else date(ano, mes + 1, 1)
+
+    colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
+
+    # Janela generosa em UTC (cobre qualquer fuso) — filtramos o dia exato em Brasília depois.
+    inicio_utc = datetime.combine(primeiro_dia, datetime.min.time()) - timedelta(hours=6)
+    fim_utc = datetime.combine(proximo_mes, datetime.min.time()) + timedelta(hours=6)
+    candidatos = (
+        RegistroPonto.query
+        .filter(RegistroPonto.data_hora >= inicio_utc, RegistroPonto.data_hora < fim_utc)
+        .order_by(RegistroPonto.data_hora.asc())
+        .all()
+    )
+
+    from collections import defaultdict
+    por_colaborador = defaultdict(list)
+    for r in candidatos:
+        if primeiro_dia <= para_brasilia(r.data_hora).date() < proximo_mes:
+            por_colaborador[r.colaborador_id].append(r)
+
+    resumo_colaboradores = []
+    for c in colaboradores:
+        dias = montar_resumo_diario(por_colaborador.get(c.id, []))
+        total_extra = 0.0
+        total_horas_mes = 0.0
+        dias_com_extra = []
+        for dia in dias:
+            extra = calcular_horas_extras_dia(dia["total_horas_decimal"], config.horario_entrada, config.horario_saida)
+            total_extra += extra
+            total_horas_mes += dia["total_horas_decimal"]
+            if extra > 0:
+                dias_com_extra.append({
+                    "data": dia["data"],
+                    "total_horas": dia["total_horas"],
+                    "horas_extras": extra,
+                    "incompleto": dia["incompleto"],
+                })
+        resumo_colaboradores.append({
+            "colaborador": c,
+            "total_extra": round(total_extra, 2),
+            "total_horas_mes": round(total_horas_mes, 2),
+            "dias_com_extra": sorted(dias_com_extra, key=lambda d: d["data"], reverse=True),
+        })
+
+    resumo_colaboradores.sort(key=lambda r: r["total_extra"], reverse=True)
+    return resumo_colaboradores, primeiro_dia, config
+
+
+@app.route("/gestor/horas-extras", methods=["GET"])
+@gestor_required
+def gestor_horas_extras():
+    mes_param = request.args.get("mes", "")
+    try:
+        ano, mes = (int(p) for p in mes_param.split("-"))
+    except Exception:
+        hoje = agora_brasilia()
+        ano, mes = hoje.year, hoje.month
+
+    resumo_colaboradores, primeiro_dia, config = _calcular_relatorio_horas_extras(ano, mes)
+    total_extra_empresa = round(sum(r["total_extra"] for r in resumo_colaboradores), 2)
+
+    return render_template(
+        "gestor_horas_extras.html",
+        resumo_colaboradores=resumo_colaboradores,
+        mes_selecionado=f"{ano:04d}-{mes:02d}",
+        nome_mes=primeiro_dia.strftime("%B de %Y"),
+        total_extra_empresa=total_extra_empresa,
+        horario_entrada=config.horario_entrada,
+        horario_saida=config.horario_saida,
+    )
+
+
+@app.route("/gestor/horas-extras/exportar-csv", methods=["GET"])
+@gestor_required
+def exportar_csv_horas_extras():
+    mes_param = request.args.get("mes", "")
+    try:
+        ano, mes = (int(p) for p in mes_param.split("-"))
+    except Exception:
+        hoje = agora_brasilia()
+        ano, mes = hoje.year, hoje.month
+
+    resumo_colaboradores, primeiro_dia, _config = _calcular_relatorio_horas_extras(ano, mes)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Colaborador", "E-mail", "Total de horas trabalhadas no mês", "Total de horas extras no mês"])
+    for r in resumo_colaboradores:
+        writer.writerow([
+            r["colaborador"].nome,
+            r["colaborador"].email,
+            formatar_horas(r["total_horas_mes"]),
+            formatar_horas(r["total_extra"]),
+        ])
+
+    nome_arquivo = f"horas_extras_{ano:04d}-{mes:02d}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={nome_arquivo}"},
+    )
 @app.route("/gestor/ajustes", methods=["GET"])
 @gestor_required
 def gestor_ajustes():
@@ -1215,6 +1408,13 @@ def _garantir_colunas_novas():
         colunas_jornada = [col["name"] for col in inspector.get_columns("configuracao_jornada")]
         if "meta_horas_diarias" not in colunas_jornada:
             comandos.append("ALTER TABLE configuracao_jornada ADD COLUMN meta_horas_diarias FLOAT DEFAULT 8.0")
+
+    if "configuracao_marca" in inspector.get_table_names():
+        colunas_marca = [col["name"] for col in inspector.get_columns("configuracao_marca")]
+        if "logo_login_base64" not in colunas_marca:
+            comandos.append("ALTER TABLE configuracao_marca ADD COLUMN logo_login_base64 TEXT")
+        if "logo_topbar_base64" not in colunas_marca:
+            comandos.append("ALTER TABLE configuracao_marca ADD COLUMN logo_topbar_base64 TEXT")
 
     if comandos:
         with db.engine.connect() as conn:
