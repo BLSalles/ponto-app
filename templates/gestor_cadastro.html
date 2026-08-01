@@ -24,16 +24,12 @@
 
     <div class="captura-facial">
       <label>Foto do rosto (para reconhecimento facial)</label>
-      <div class="camera-frame camera-frame-cadastro">
-        <video id="video-cadastro" autoplay playsinline></video>
-        <canvas id="canvas-cadastro" width="320" height="240" style="display:none;"></canvas>
-      </div>
-      <div class="status-linha">
+      <div class="status-linha" style="justify-content:flex-start;">
         <span class="status-chip" id="foto-status">
           <span class="status-dot pendente"></span> Nenhuma foto capturada
         </span>
       </div>
-      <button type="button" id="btn-tirar-foto" class="btn-secundario">📷 Capturar Foto</button>
+      <button type="button" class="btn-secundario" onclick="abrirModalFacialCadastro()">📷 Capturar Foto</button>
       <input type="hidden" name="foto" id="input-foto">
     </div>
 
@@ -50,7 +46,7 @@
       <div class="colaborador-item">
         <span class="colaborador-avatar">{{ c.nome[0]|upper }}</span>
         <div class="colaborador-info">
-          <span class="colaborador-nome">{{ c.nome }}</span>
+          <span class="colaborador-nome">{{ c.nome }}{% if not c.ativo %} <span class="badge badge-erro">Inativo</span>{% endif %}</span>
           <span class="colaborador-email">{{ c.email }}</span>
         </div>
         {% if not c.face_encoding %}
@@ -58,6 +54,7 @@
         {% else %}
           <span class="badge badge-ok">Rosto cadastrado</span>
         {% endif %}
+        <a href="{{ url_for('editar_colaborador', colaborador_id=c.id) }}" class="btn-secundario" style="margin-top:0;">✏️ Editar</a>
       </div>
     {% else %}
       <p class="vazio">Nenhum colaborador cadastrado ainda.</p>
@@ -65,24 +62,6 @@
   </div>
 </div>
 
-<script>
-const video = document.getElementById('video-cadastro');
-const canvas = document.getElementById('canvas-cadastro');
-const btnFoto = document.getElementById('btn-tirar-foto');
-const inputFoto = document.getElementById('input-foto');
-const fotoStatus = document.getElementById('foto-status');
+{% include "_modal_facial_captura.html" %}
 
-navigator.mediaDevices.getUserMedia({ video: true })
-  .then(stream => { video.srcObject = stream; })
-  .catch(() => {
-    fotoStatus.innerHTML = '<span class="status-dot erro"></span> Não foi possível acessar a câmera';
-  });
-
-btnFoto.addEventListener('click', () => {
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  inputFoto.value = canvas.toDataURL('image/jpeg', 0.8);
-  fotoStatus.innerHTML = '<span class="status-dot ok"></span> Foto capturada com sucesso';
-});
-</script>
 {% endblock %}

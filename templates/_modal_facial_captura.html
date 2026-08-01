@@ -1,0 +1,117 @@
+<!--
+  Modal de captura facial reutilizável — mesmo layout visual do reconhecimento
+  facial usado em "Bater Ponto" (moldura oval, selo de check, controles).
+  Aqui o objetivo é só CAPTURAR uma foto (cadastro/edição de colaborador), não
+  verificar identidade — por isso a captura é manual (botão), não automática.
+
+  Requer que a página que incluir este partial tenha:
+  - Um <input type="hidden" id="input-foto" name="foto"> no formulário
+  - Um elemento com id="foto-status" para mostrar o status da captura
+  - Um botão/gatilho que chame abrirModalFacialCadastro()
+-->
+<div class="modal-facial" id="modal-facial-cadastro">
+  <div class="modal-facial-caixa">
+    <div class="modal-facial-topo">
+      <span>Cadastro facial</span>
+      <button type="button" class="modal-facial-fechar-x" id="btn-cadastro-fechar-x" aria-label="Fechar">✕</button>
+    </div>
+
+    <div class="oval-camera">
+      <video id="video-cadastro-modal" autoplay playsinline muted></video>
+      <div class="oval-anel"></div>
+      <div class="check-badge" id="check-badge-cadastro">
+        <svg viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <p class="modal-facial-status" id="status-cadastro-modal">Posicione o rosto no quadro e toque em Capturar</p>
+
+    <div class="modal-facial-controles">
+      <button type="button" class="modal-controle-btn" id="btn-flash-cadastro" title="Lanterna" style="visibility:hidden;">🔦</button>
+      <button type="button" class="modal-fechar-pill" id="btn-capturar-cadastro">📷 Capturar</button>
+      <button type="button" class="modal-controle-btn" id="btn-trocar-camera-cadastro" title="Trocar câmera">🔄</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const modal = document.getElementById('modal-facial-cadastro');
+  const video = document.getElementById('video-cadastro-modal');
+  const status = document.getElementById('status-cadastro-modal');
+  const checkBadge = document.getElementById('check-badge-cadastro');
+  const btnFecharX = document.getElementById('btn-cadastro-fechar-x');
+  const btnCapturar = document.getElementById('btn-capturar-cadastro');
+  const btnTrocarCamera = document.getElementById('btn-trocar-camera-cadastro');
+  const btnFlash = document.getElementById('btn-flash-cadastro');
+  const inputFoto = document.getElementById('input-foto');
+  const fotoStatus = document.getElementById('foto-status');
+
+  let streamAtual = null;
+  let facingModeAtual = 'user';
+  let trilhaVideoAtual = null;
+  let torchLigado = false;
+
+  function abrirCamera(facingMode) {
+    return navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } } })
+      .then(stream => {
+        streamAtual = stream;
+        trilhaVideoAtual = stream.getVideoTracks()[0];
+        video.srcObject = stream;
+        const capacidades = trilhaVideoAtual.getCapabilities ? trilhaVideoAtual.getCapabilities() : {};
+        btnFlash.style.visibility = capacidades.torch ? 'visible' : 'hidden';
+        torchLigado = false;
+      });
+  }
+
+  window.abrirModalFacialCadastro = function () {
+    status.textContent = 'Posicione o rosto no quadro e toque em Capturar';
+    checkBadge.className = 'check-badge';
+    modal.classList.add('mostrar');
+    abrirCamera(facingModeAtual).catch(() => {
+      status.textContent = 'Não foi possível acessar a câmera.';
+    });
+  };
+
+  function fecharModal() {
+    modal.classList.remove('mostrar');
+    if (streamAtual) {
+      streamAtual.getTracks().forEach(t => t.stop());
+      streamAtual = null;
+    }
+  }
+
+  btnFecharX.addEventListener('click', fecharModal);
+
+  btnTrocarCamera.addEventListener('click', () => {
+    facingModeAtual = facingModeAtual === 'user' ? 'environment' : 'user';
+    if (streamAtual) streamAtual.getTracks().forEach(t => t.stop());
+    abrirCamera(facingModeAtual).catch(() => {
+      status.textContent = 'Não foi possível trocar de câmera.';
+    });
+  });
+
+  btnFlash.addEventListener('click', () => {
+    if (!trilhaVideoAtual) return;
+    torchLigado = !torchLigado;
+    trilhaVideoAtual.applyConstraints({ advanced: [{ torch: torchLigado }] }).catch(() => {});
+  });
+
+  btnCapturar.addEventListener('click', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 480;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    const foto = canvas.toDataURL('image/jpeg', 0.85);
+
+    inputFoto.value = foto;
+    fotoStatus.innerHTML = '<span class="status-dot ok"></span> Foto capturada com sucesso';
+
+    checkBadge.className = 'check-badge mostrar';
+    status.textContent = 'Foto capturada!';
+    setTimeout(fecharModal, 900);
+  });
+})();
+</script>

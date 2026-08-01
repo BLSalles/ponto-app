@@ -121,7 +121,7 @@
   </div>
 </div>
 
-<canvas id="canvas" width="320" height="240" style="display:none;"></canvas>
+<canvas id="canvas" width="640" height="480" style="display:none;"></canvas>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
@@ -216,7 +216,7 @@ const iconeCheck = '<path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" str
 const iconeErro = '<path d="M6 6l12 12M18 6L6 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
 
 function abrirCameraModal(facingMode) {
-  return navigator.mediaDevices.getUserMedia({ video: { facingMode } })
+  return navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } } })
     .then(stream => {
       streamAtual = stream;
       trilhaVideoAtual = stream.getVideoTracks()[0];

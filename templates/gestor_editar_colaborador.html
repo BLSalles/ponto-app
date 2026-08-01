@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block titulo %}Editar Colaborador - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Editar {{ colaborador.nome }}</h2>
+    <a href="{{ url_for('gestor_cadastro') }}" class="btn-secundario" style="margin-top:0;">← Voltar</a>
+  </div>
+
+  <form method="POST" action="{{ url_for('salvar_edicao_colaborador', colaborador_id=colaborador.id) }}">
+    <div class="form-grid">
+      <div class="form-campo">
+        <label>Nome completo</label>
+        <input type="text" name="nome" value="{{ colaborador.nome }}" required>
+      </div>
+      <div class="form-campo">
+        <label>E-mail corporativo</label>
+        <input type="email" name="email" value="{{ colaborador.email }}" required>
+      </div>
+      <div class="form-campo">
+        <label>Nova senha (opcional)</label>
+        <input type="password" name="senha" placeholder="Deixe em branco para manter a atual">
+      </div>
+    </div>
+
+    <label class="checkbox-linha">
+      <input type="checkbox" name="ativo" {% if colaborador.ativo %}checked{% endif %}>
+      Colaborador ativo (desmarque para bloquear o login sem apagar o histórico de ponto)
+    </label>
+
+    <div class="captura-facial">
+      <label>Rosto cadastrado</label>
+      <div class="status-linha" style="justify-content:flex-start;">
+        <span class="status-chip" id="foto-status">
+          {% if colaborador.face_encoding %}
+            <span class="status-dot ok"></span> Rosto já cadastrado
+          {% else %}
+            <span class="status-dot pendente"></span> Nenhum rosto cadastrado
+          {% endif %}
+        </span>
+      </div>
+      <button type="button" class="btn-secundario" onclick="abrirModalFacialCadastro()">📷 {{ 'Atualizar' if colaborador.face_encoding else 'Cadastrar' }} rosto</button>
+      <p class="ponto-instrucao" style="text-align:left; margin-top:6px;">Só é necessário capturar uma nova foto se quiser trocar o rosto cadastrado — se não capturar nada, o rosto atual continua valendo.</p>
+      <input type="hidden" name="foto" id="input-foto">
+    </div>
+
+    <button type="submit" class="btn-primario">Salvar alterações</button>
+  </form>
+</div>
+
+{% include "_modal_facial_captura.html" %}
+
+{% endblock %}

@@ -46,9 +46,11 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 
 db = SQLAlchemy(app)
 
-# Distância máxima aceita entre encodings faciais para considerar "é a mesma pessoa"
-# Quanto menor, mais rígido. 0.6 é o padrão da biblioteca face_recognition.
-FACE_MATCH_TOLERANCE = 0.55
+# Distância máxima aceita entre encodings faciais para considerar "é a mesma pessoa".
+# Quanto menor, mais rígido. 0.6 é o padrão "solto" da biblioteca face_recognition;
+# usamos um valor mais estrito porque é melhor pedir pra tentar de novo do que
+# aceitar o rosto de outra pessoa por engano.
+FACE_MATCH_TOLERANCE = 0.45
 
 # ---------------------------------------------------------------------------
 # Fuso horário - Brasília
@@ -280,6 +282,11 @@ def login_required(f):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             return redirect(url_for("login"))
+        user = Colaborador.query.get(session["user_id"])
+        if not user or not user.ativo:
+            session.clear()
+            flash("Sua conta foi desativada. Procure o gestor.")
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
     return wrapper
 
@@ -297,13 +304,30 @@ def gestor_required(f):
     return wrapper
 
 
-def imagem_base64_para_encoding(imagem_base64):
-    """Recebe uma string base64 (data URL) e devolve o encoding facial (128-d) ou None."""
+def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
+    """Recebe uma string base64 (data URL) e devolve o encoding facial (128-d) ou None.
+
+    Cuidados importantes para evitar falso-positivo entre pessoas diferentes:
+    - Se houver mais de um rosto na foto (ex.: alguém passando atrás), usa o MAIOR
+      rosto detectado (mais próximo da câmera) em vez de simplesmente o primeiro
+      da lista, que não tem ordem garantida.
+    - num_jitters > 1 faz o dlib reamostrar o rosto algumas vezes e tirar a média,
+      gerando um encoding mais estável/confiável (mais lento, mas o ponto não é
+      uma operação de alta frequência)."""
     if "," in imagem_base64:
         imagem_base64 = imagem_base64.split(",", 1)[1]
     dados = base64.b64decode(imagem_base64)
     imagem = face_recognition.load_image_file(io.BytesIO(dados))
-    encodings = face_recognition.face_encodings(imagem)
+
+    localizacoes = face_recognition.face_locations(imagem)
+    if not localizacoes:
+        return None
+
+    if len(localizacoes) > 1:
+        # (top, right, bottom, left) -> escolhe a maior área, isto é, o rosto mais em destaque.
+        localizacoes = [max(localizacoes, key=lambda loc: (loc[2] - loc[0]) * (loc[1] - loc[3]))]
+
+    encodings = face_recognition.face_encodings(imagem, known_face_locations=localizacoes, num_jitters=num_jitters)
     if not encodings:
         return None
     return encodings[0]
@@ -634,6 +658,9 @@ def login():
         senha = request.form["senha"]
         user = Colaborador.query.filter_by(email=email).first()
         if user and user.check_senha(senha):
+            if not user.ativo:
+                flash("Este colaborador está desativado. Procure o gestor.")
+                return render_template("login.html")
             session["user_id"] = user.id
             session["nome"] = user.nome
             session["is_gestor"] = user.is_gestor
@@ -720,6 +747,7 @@ def registrar_ponto():
     distancia = np.linalg.norm(np.array(user.face_encoding) - np.array(encoding_atual))
 
     if distancia > FACE_MATCH_TOLERANCE:
+        print(f"[facial] Rejeitado: {user.nome} (distância={distancia:.4f}, tolerância={FACE_MATCH_TOLERANCE})")
         return jsonify({
             "ok": False,
             "mensagem": "O rosto não confere com o cadastrado. Registro não realizado."
@@ -1107,6 +1135,62 @@ def cadastrar_colaborador():
     db.session.add(novo)
     db.session.commit()
     flash(f"Colaborador {nome} cadastrado com sucesso.")
+    return redirect(url_for("gestor_cadastro"))
+
+
+@app.route("/gestor/colaborador/<int:colaborador_id>/editar", methods=["GET"])
+@gestor_required
+def editar_colaborador(colaborador_id):
+    colaborador = Colaborador.query.get_or_404(colaborador_id)
+    if colaborador.is_gestor:
+        flash("Não é possível editar a conta do gestor por aqui.")
+        return redirect(url_for("gestor_cadastro"))
+    return render_template("gestor_editar_colaborador.html", colaborador=colaborador)
+
+
+@app.route("/gestor/colaborador/<int:colaborador_id>/editar", methods=["POST"])
+@gestor_required
+def salvar_edicao_colaborador(colaborador_id):
+    colaborador = Colaborador.query.get_or_404(colaborador_id)
+    if colaborador.is_gestor:
+        flash("Não é possível editar a conta do gestor por aqui.")
+        return redirect(url_for("gestor_cadastro"))
+
+    nome = request.form.get("nome", "").strip()
+    email = request.form.get("email", "").strip().lower()
+    senha = request.form.get("senha", "").strip()
+    ativo = request.form.get("ativo") == "on"
+    foto_base64 = request.form.get("foto")
+
+    if not (nome and email):
+        flash("Nome e e-mail são obrigatórios.")
+        return redirect(url_for("editar_colaborador", colaborador_id=colaborador_id))
+
+    email_em_uso = Colaborador.query.filter(
+        Colaborador.email == email, Colaborador.id != colaborador_id
+    ).first()
+    if email_em_uso:
+        flash("Já existe outro colaborador com esse e-mail.")
+        return redirect(url_for("editar_colaborador", colaborador_id=colaborador_id))
+
+    colaborador.nome = nome
+    colaborador.email = email
+    colaborador.ativo = ativo
+
+    if senha:
+        colaborador.set_senha(senha)
+
+    mensagem = f"Dados de {nome} atualizados com sucesso."
+    if foto_base64:
+        encoding = imagem_base64_para_encoding(foto_base64)
+        if encoding is None:
+            flash("Não foi possível reconhecer um rosto na nova foto. O rosto cadastrado anteriormente foi mantido.")
+        else:
+            colaborador.face_encoding = encoding.tolist()
+            mensagem += " Rosto atualizado."
+
+    db.session.commit()
+    flash(mensagem)
     return redirect(url_for("gestor_cadastro"))
 
 

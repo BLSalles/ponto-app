@@ -419,6 +419,23 @@ textarea { resize: vertical; margin-top: 4px; }
   border-top: 1px solid var(--cor-borda);
 }
 
+.checkbox-linha {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--cor-texto);
+  cursor: pointer;
+}
+
+.checkbox-linha input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Botões                                                                  */
 /* ---------------------------------------------------------------------- */
@@ -871,6 +888,7 @@ code {
   padding: 10px 12px;
   border: 1px solid var(--cor-borda);
   border-radius: var(--raio-pequeno);
+  flex-wrap: wrap;
 }
 
 .colaborador-avatar {
