@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import paginacao %}
 {% block titulo %}Meus Registros{% endblock %}
 {% block conteudo %}
 
@@ -58,7 +59,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for r in registros %}
+        {% for r in registros.items %}
         <tr>
           <td>{{ r.data_hora | brasilia }}</td>
           <td class="celula-localizacao">
@@ -84,6 +85,7 @@
       </tbody>
     </table>
   </div>
+  {{ paginacao(registros, 'meus_registros') }}
 </div>
 
 <div class="card">

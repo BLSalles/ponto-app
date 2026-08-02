@@ -304,8 +304,20 @@ def gestor_required(f):
     return wrapper
 
 
+MENSAGENS_POSICIONAMENTO = {
+    "sem_rosto": "Não conseguimos identificar um rosto. Centralize seu rosto na câmera com boa iluminação.",
+    "muito_longe": "Aproxime um pouco mais o rosto da câmera.",
+    "muito_perto": "Afaste um pouco o rosto da câmera.",
+}
+
+
 def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
-    """Recebe uma string base64 (data URL) e devolve o encoding facial (128-d) ou None.
+    """Recebe uma string base64 (data URL) e devolve (encoding, motivo).
+
+    - Sucesso: (encoding_128d, None)
+    - Falha: (None, motivo) — motivo é uma chave de MENSAGENS_POSICIONAMENTO,
+      para dar um retorno específico ("aproxime-se"/"afaste-se") em vez de um
+      genérico "não deu certo".
 
     Cuidados importantes para evitar falso-positivo entre pessoas diferentes:
     - Se houver mais de um rosto na foto (ex.: alguém passando atrás), usa o MAIOR
@@ -321,16 +333,31 @@ def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
 
     localizacoes = face_recognition.face_locations(imagem)
     if not localizacoes:
-        return None
+        return None, "sem_rosto"
 
     if len(localizacoes) > 1:
         # (top, right, bottom, left) -> escolhe a maior área, isto é, o rosto mais em destaque.
         localizacoes = [max(localizacoes, key=lambda loc: (loc[2] - loc[0]) * (loc[1] - loc[3]))]
 
+    # Verifica se o rosto está num tamanho razoável dentro do quadro — muito pequeno
+    # (pessoa longe) prejudica a precisão do reconhecimento tanto quanto muito
+    # grande (pessoa colada na câmera, cortando parte do rosto).
+    altura_img = len(imagem)
+    largura_img = len(imagem[0]) if altura_img else 0
+    top, right, bottom, left = localizacoes[0]
+    area_rosto = max(0, bottom - top) * max(0, right - left)
+    area_imagem = altura_img * largura_img
+    proporcao = (area_rosto / area_imagem) if area_imagem else 0
+
+    if proporcao < 0.035:
+        return None, "muito_longe"
+    if proporcao > 0.45:
+        return None, "muito_perto"
+
     encodings = face_recognition.face_encodings(imagem, known_face_locations=localizacoes, num_jitters=num_jitters)
     if not encodings:
-        return None
-    return encodings[0]
+        return None, "sem_rosto"
+    return encodings[0], None
 
 
 def obter_endereco(latitude, longitude):
@@ -740,9 +767,10 @@ def registrar_ponto():
             "mensagem": "Seu rosto ainda não foi cadastrado. Procure o gestor."
         }), 400
 
-    encoding_atual = imagem_base64_para_encoding(foto_base64)
+    encoding_atual, motivo_falha = imagem_base64_para_encoding(foto_base64)
     if encoding_atual is None:
-        return jsonify({"ok": False, "mensagem": "Não foi possível identificar um rosto na imagem. Tente novamente com boa iluminação."}), 400
+        mensagem = MENSAGENS_POSICIONAMENTO.get(motivo_falha, "Não foi possível identificar um rosto na imagem.")
+        return jsonify({"ok": False, "mensagem": mensagem, "reposicionar": True}), 400
 
     distancia = np.linalg.norm(np.array(user.face_encoding) - np.array(encoding_atual))
 
@@ -750,7 +778,8 @@ def registrar_ponto():
         print(f"[facial] Rejeitado: {user.nome} (distância={distancia:.4f}, tolerância={FACE_MATCH_TOLERANCE})")
         return jsonify({
             "ok": False,
-            "mensagem": "O rosto não confere com o cadastrado. Registro não realizado."
+            "mensagem": "O rosto não confere com o cadastrado.",
+            "reposicionar": True,
         }), 403
 
     endereco = obter_endereco(latitude, longitude)
@@ -790,14 +819,16 @@ def registrar_ponto():
 @login_required
 def meus_registros():
     user = Colaborador.query.get(session["user_id"])
-    registros = (
+
+    # Janela usada só para montar o resumo por dia (não precisa paginar, é agregado).
+    registros_para_resumo = (
         RegistroPonto.query
         .filter_by(colaborador_id=user.id)
         .order_by(RegistroPonto.data_hora.desc())
         .limit(200)
         .all()
     )
-    resumo_diario = montar_resumo_diario(registros)
+    resumo_diario = montar_resumo_diario(registros_para_resumo)
 
     config = obter_configuracao()
     hoje = agora_brasilia().date()
@@ -808,6 +839,15 @@ def meus_registros():
         )
         if dia["data"].year == hoje.year and dia["data"].month == hoje.month:
             total_extra_mes += dia["horas_extras"]
+
+    # Histórico detalhado (tabela) é paginado separadamente, sem limite fixo.
+    pagina = request.args.get("page", 1, type=int)
+    registros = (
+        RegistroPonto.query
+        .filter_by(colaborador_id=user.id)
+        .order_by(RegistroPonto.data_hora.desc())
+        .paginate(page=pagina, per_page=20, error_out=False)
+    )
 
     solicitacoes = (
         SolicitacaoAjuste.query
@@ -873,8 +913,10 @@ def gestor_consulta():
     from collections import defaultdict
 
     config = obter_configuracao()
-    registros = (
-        RegistroPonto.query.order_by(RegistroPonto.data_hora.desc()).limit(200).all()
+    pagina = request.args.get("page", 1, type=int)
+    registros_paginados = (
+        RegistroPonto.query.order_by(RegistroPonto.data_hora.desc())
+        .paginate(page=pagina, per_page=25, error_out=False)
     )
     colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
     total_colaboradores = len(colaboradores)
@@ -922,7 +964,7 @@ def gestor_consulta():
 
     return render_template(
         "gestor_consulta.html",
-        registros=registros,
+        registros=registros_paginados,
         colaboradores=colaboradores,
         registros_hoje=len(registros_hoje_todos),
         total_colaboradores=total_colaboradores,
@@ -1110,6 +1152,20 @@ def salvar_configuracoes():
     return redirect(url_for("gestor_configuracoes"))
 
 
+def encontrar_colaborador_por_rosto(encoding_novo, ignorar_id=None):
+    """Verifica se esse rosto já está cadastrado em OUTRO colaborador — evita que duas
+    pessoas fiquem com o mesmo rosto por engano (o que quebraria o reconhecimento pros
+    dois, já que o sistema não saberia mais diferenciá-los)."""
+    candidatos = Colaborador.query.filter(Colaborador.face_encoding.isnot(None)).all()
+    for c in candidatos:
+        if ignorar_id and c.id == ignorar_id:
+            continue
+        distancia = np.linalg.norm(np.array(c.face_encoding) - np.array(encoding_novo))
+        if distancia <= FACE_MATCH_TOLERANCE:
+            return c
+    return None
+
+
 @app.route("/gestor/cadastrar", methods=["POST"])
 @gestor_required
 def cadastrar_colaborador():
@@ -1126,11 +1182,16 @@ def cadastrar_colaborador():
     novo.set_senha(senha)
 
     if foto_base64:
-        encoding = imagem_base64_para_encoding(foto_base64)
+        encoding, motivo_falha = imagem_base64_para_encoding(foto_base64)
         if encoding is None:
-            flash("Não foi possível reconhecer um rosto na foto enviada. Colaborador criado sem cadastro facial.")
+            mensagem_motivo = MENSAGENS_POSICIONAMENTO.get(motivo_falha, "Não foi possível reconhecer um rosto na foto enviada.")
+            flash(f"{mensagem_motivo} Colaborador criado sem cadastro facial — edite o cadastro para tentar de novo.")
         else:
-            novo.face_encoding = encoding.tolist()
+            duplicado = encontrar_colaborador_por_rosto(encoding)
+            if duplicado:
+                flash(f"Esse rosto já parece estar cadastrado para {duplicado.nome}. Colaborador criado sem cadastro facial — confira se não é duplicidade antes de tentar de novo.")
+            else:
+                novo.face_encoding = encoding.tolist()
 
     db.session.add(novo)
     db.session.commit()
@@ -1182,12 +1243,17 @@ def salvar_edicao_colaborador(colaborador_id):
 
     mensagem = f"Dados de {nome} atualizados com sucesso."
     if foto_base64:
-        encoding = imagem_base64_para_encoding(foto_base64)
+        encoding, motivo_falha = imagem_base64_para_encoding(foto_base64)
         if encoding is None:
-            flash("Não foi possível reconhecer um rosto na nova foto. O rosto cadastrado anteriormente foi mantido.")
+            mensagem_motivo = MENSAGENS_POSICIONAMENTO.get(motivo_falha, "Não foi possível reconhecer um rosto na nova foto.")
+            flash(f"{mensagem_motivo} O rosto cadastrado anteriormente foi mantido.")
         else:
-            colaborador.face_encoding = encoding.tolist()
-            mensagem += " Rosto atualizado."
+            duplicado = encontrar_colaborador_por_rosto(encoding, ignorar_id=colaborador.id)
+            if duplicado:
+                flash(f"Esse rosto já parece estar cadastrado para {duplicado.nome}. O rosto anterior foi mantido — confira se não é duplicidade.")
+            else:
+                colaborador.face_encoding = encoding.tolist()
+                mensagem += " Rosto atualizado."
 
     db.session.commit()
     flash(mensagem)
@@ -1374,12 +1440,12 @@ def gestor_ajustes():
         .order_by(SolicitacaoAjuste.criado_em.asc())
         .all()
     )
+    pagina = request.args.get("page", 1, type=int)
     historico = (
         SolicitacaoAjuste.query
         .filter(SolicitacaoAjuste.status != "pendente")
         .order_by(SolicitacaoAjuste.respondido_em.desc())
-        .limit(50)
-        .all()
+        .paginate(page=pagina, per_page=20, error_out=False)
     )
     return render_template("gestor_ajustes.html", pendentes=pendentes, historico=historico)
 

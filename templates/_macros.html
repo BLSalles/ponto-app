@@ -1,0 +1,19 @@
+{% macro paginacao(pag, endpoint) %}
+{% if pag.pages > 1 %}
+<div class="paginacao">
+  {% if pag.has_prev %}
+    <a href="{{ url_for(endpoint, page=pag.prev_num) }}" class="paginacao-btn">← Anterior</a>
+  {% else %}
+    <span class="paginacao-btn paginacao-desabilitado">← Anterior</span>
+  {% endif %}
+
+  <span class="paginacao-info">Página {{ pag.page }} de {{ pag.pages }} · {{ pag.total }} no total</span>
+
+  {% if pag.has_next %}
+    <a href="{{ url_for(endpoint, page=pag.next_num) }}" class="paginacao-btn">Próxima →</a>
+  {% else %}
+    <span class="paginacao-btn paginacao-desabilitado">Próxima →</span>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}

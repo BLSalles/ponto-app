@@ -1401,6 +1401,29 @@ table a:hover { text-decoration: underline; }
   border: 5px solid var(--cor-marca-clara);
   box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25) inset, 0 0 26px rgba(34, 211, 238, 0.55);
   pointer-events: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.oval-anel.anel-sucesso {
+  border-color: var(--cor-sucesso);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25) inset, 0 0 34px rgba(23, 178, 106, 0.85);
+  animation: pulsarAnel 0.9s ease-out 1;
+}
+
+.oval-anel.anel-erro {
+  border-color: var(--cor-erro);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25) inset, 0 0 30px rgba(220, 38, 38, 0.75);
+}
+
+.oval-anel.anel-atencao {
+  border-color: var(--cor-alerta);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25) inset, 0 0 30px rgba(217, 119, 6, 0.75);
+}
+
+@keyframes pulsarAnel {
+  0% { transform: translate(-50%, -50%) scale(1); }
+  40% { transform: translate(-50%, -50%) scale(1.04); }
+  100% { transform: translate(-50%, -50%) scale(1); }
 }
 
 .check-badge {
@@ -1408,8 +1431,8 @@ table a:hover { text-decoration: underline; }
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%) scale(0);
-  width: 56px;
-  height: 56px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
   background: var(--cor-sucesso);
   display: flex;
@@ -1424,6 +1447,13 @@ table a:hover { text-decoration: underline; }
 .check-badge.mostrar {
   transform: translate(-50%, -50%) scale(1);
   opacity: 1;
+  animation: pulsarBadge 1.1s ease-out 1;
+}
+
+@keyframes pulsarBadge {
+  0% { box-shadow: 0 0 0 0 rgba(23, 178, 106, 0.6), 0 4px 18px rgba(0, 0, 0, 0.4); }
+  70% { box-shadow: 0 0 0 24px rgba(23, 178, 106, 0), 0 4px 18px rgba(0, 0, 0, 0.4); }
+  100% { box-shadow: 0 0 0 0 rgba(23, 178, 106, 0), 0 4px 18px rgba(0, 0, 0, 0.4); }
 }
 
 .check-badge.check-badge-erro {
@@ -1437,7 +1467,35 @@ table a:hover { text-decoration: underline; }
   font-weight: 500;
   padding: 14px 16px 2px;
   margin: 0;
-  min-height: 20px;
+  min-height: 40px;
+  transition: color 0.2s ease;
+}
+
+.modal-facial-status.status-sucesso {
+  color: #4ade80;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.modal-facial-status-sub {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #bbf7d0;
+}
+
+.modal-facial-status.status-erro {
+  color: #fca5a5;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.modal-facial-status.status-atencao {
+  color: #fcd34d;
+  font-size: 13.5px;
+  font-weight: 600;
 }
 
 .modal-facial-controles {
@@ -1569,6 +1627,46 @@ table a:hover { text-decoration: underline; }
 .extra-dia-total {
   color: var(--cor-texto-suave);
   font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Paginação                                                                */
+/* ---------------------------------------------------------------------- */
+.paginacao {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--cor-borda);
+  flex-wrap: wrap;
+}
+
+.paginacao-btn {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cor-primaria);
+  text-decoration: none;
+  padding: 7px 14px;
+  border-radius: var(--raio-pequeno);
+  background: var(--cor-primaria-clara);
+  white-space: nowrap;
+}
+
+.paginacao-btn:hover { background: var(--cor-borda); }
+
+.paginacao-btn.paginacao-desabilitado {
+  color: var(--cor-pendente);
+  background: var(--cor-fundo);
+  cursor: default;
+  pointer-events: none;
+}
+
+.paginacao-info {
+  font-size: 12.5px;
+  color: var(--cor-texto-suave);
+  text-align: center;
 }
 
 /* ---------------------------------------------------------------------- */

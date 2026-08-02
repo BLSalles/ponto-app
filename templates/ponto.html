@@ -101,9 +101,9 @@
       <button type="button" class="modal-facial-fechar-x" id="modal-fechar-x" aria-label="Fechar">✕</button>
     </div>
 
-    <div class="oval-camera">
+    <div class="oval-camera" id="oval-camera">
       <video id="video-modal" autoplay playsinline muted></video>
-      <div class="oval-anel"></div>
+      <div class="oval-anel" id="oval-anel"></div>
       <div class="check-badge" id="check-badge">
         <svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -230,8 +230,11 @@ function abrirCameraModal(facingMode) {
 }
 
 function abrirModalFacial() {
+  tentativaAtual = 0;
   statusModal.textContent = 'Posicione seu rosto no quadro';
+  statusModal.className = 'modal-facial-status';
   checkBadge.className = 'check-badge';
+  ovalAnel.className = 'oval-anel';
   modalFacial.classList.add('mostrar');
 
   abrirCameraModal(facingModeAtual)
@@ -301,10 +304,16 @@ function atualizarMarcacoesHoje(tipo, horaLocal) {
   document.getElementById('marcacoes-hoje').open = true;
 }
 
+const ovalAnel = document.getElementById('oval-anel');
+const MAX_TENTATIVAS = 6;
+let tentativaAtual = 0;
+
 function executarRegistro() {
+  tentativaAtual += 1;
+
   const ctx = canvas.getContext('2d');
   ctx.drawImage(videoModal, 0, 0, canvas.width, canvas.height);
-  const foto = canvas.toDataURL('image/jpeg', 0.8);
+  const foto = canvas.toDataURL('image/jpeg', 0.85);
 
   fetch('/api/registrar-ponto', {
     method: 'POST',
@@ -316,31 +325,57 @@ function executarRegistro() {
       resultado.textContent = data.mensagem;
       resultado.className = data.ok ? 'resultado-msg sucesso' : 'resultado-msg erro';
 
-      checkBadgeIcone.outerHTML = data.ok
-        ? '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeCheck + '</svg>'
-        : '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
-      checkBadge.className = 'check-badge mostrar' + (data.ok ? '' : ' check-badge-erro');
-
-      const rotuloTipo = data.tipo === 'saida' ? 'Saída registrada' : 'Entrada registrada';
-      statusModal.textContent = data.ok ? rotuloTipo + '!' : 'Não foi possível registrar';
-
       if (data.ok) {
+        // ---- SUCESSO: feedback bem evidente (selo grande + pulso verde + texto) ----
+        checkBadgeIcone.outerHTML = '<svg id="check-badge-icone" viewBox="0 0 24 24" width="34" height="34" fill="none">' + iconeCheck + '</svg>';
+        checkBadge.className = 'check-badge mostrar';
+        ovalAnel.className = 'oval-anel anel-sucesso';
+
+        const rotuloTipo = data.tipo === 'saida' ? 'SAÍDA REGISTRADA' : 'ENTRADA REGISTRADA';
+        statusModal.innerHTML = '✅ <strong>' + rotuloTipo + '</strong><br><span class="modal-facial-status-sub">às ' + (data.horario || '') + '</span>';
+        statusModal.className = 'modal-facial-status status-sucesso';
+
         registrosHojeCount = data.registros_hoje_count;
         proximoLembreteEm = 0;
         verificarLembrete();
         atualizarMarcacoesHoje(data.tipo, data.horario ? data.horario.slice(0, 5) : '');
-        mostrarBannerConfirmacao('✅ ' + rotuloTipo + ' às ' + (data.horario || '') + ' em ' + (data.data || '') + '.');
+        mostrarBannerConfirmacao('✅ ' + rotuloTipo.charAt(0) + rotuloTipo.slice(1).toLowerCase() + ' às ' + (data.horario || '') + ' em ' + (data.data || '') + '.');
+
+        setTimeout(fecharModalFacial, 2200);
+        return;
       }
 
-      setTimeout(fecharModalFacial, data.ok ? 1300 : 1800);
+      // ---- FALHA: se for um problema de posicionamento/reconhecimento, tenta de novo ----
+      if (data.reposicionar && tentativaAtual < MAX_TENTATIVAS) {
+        checkBadge.className = 'check-badge';
+        ovalAnel.className = 'oval-anel anel-atencao';
+        statusModal.innerHTML = '⚠️ ' + data.mensagem;
+        statusModal.className = 'modal-facial-status status-atencao';
+        setTimeout(() => {
+          statusModal.textContent = 'Tentando novamente...';
+          statusModal.className = 'modal-facial-status';
+          executarRegistro();
+        }, 1500);
+        return;
+      }
+
+      // ---- FALHA definitiva (excedeu tentativas, ou erro não recuperável) ----
+      checkBadgeIcone.outerHTML = '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
+      checkBadge.className = 'check-badge mostrar check-badge-erro';
+      ovalAnel.className = 'oval-anel anel-erro';
+      statusModal.textContent = data.mensagem || 'Não foi possível registrar.';
+      statusModal.className = 'modal-facial-status status-erro';
+      setTimeout(fecharModalFacial, 2200);
     })
     .catch(() => {
       resultado.textContent = 'Erro ao registrar o ponto.';
       resultado.className = 'resultado-msg erro';
       checkBadgeIcone.outerHTML = '<svg id="check-badge-icone" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
       checkBadge.className = 'check-badge mostrar check-badge-erro';
-      statusModal.textContent = 'Erro ao registrar o ponto.';
-      setTimeout(fecharModalFacial, 1800);
+      ovalAnel.className = 'oval-anel anel-erro';
+      statusModal.textContent = 'Erro de conexão ao registrar o ponto.';
+      statusModal.className = 'modal-facial-status status-erro';
+      setTimeout(fecharModalFacial, 2000);
     });
 }
 

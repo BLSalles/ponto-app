@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import paginacao %}
 {% block titulo %}Ajustes - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
@@ -35,7 +36,7 @@
   {% endif %}
 </div>
 
-{% if historico %}
+{% if historico.total %}
 <div class="card">
   <div class="card-header">
     <h2>Histórico</h2>
@@ -51,7 +52,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for s in historico %}
+        {% for s in historico.items %}
         <tr>
           <td>{{ s.colaborador.nome }}</td>
           <td>{{ s.data_referencia.strftime('%d/%m/%Y') }} — {{ 'Entrada' if s.tipo == 'entrada' else 'Saída' }} às {{ s.horario_solicitado }}</td>
@@ -68,6 +69,7 @@
       </tbody>
     </table>
   </div>
+  {{ paginacao(historico, 'gestor_ajustes') }}
 </div>
 {% endif %}
 

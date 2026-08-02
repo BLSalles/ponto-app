@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import paginacao %}
 {% block titulo %}Dashboard - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
@@ -108,7 +109,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for r in registros %}
+        {% for r in registros.items %}
         <tr>
           <td>{{ r.colaborador.nome }}</td>
           <td>{{ r.data_hora | brasilia }}</td>
@@ -136,6 +137,7 @@
       </tbody>
     </table>
   </div>
+  {{ paginacao(registros, 'gestor_consulta') }}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
