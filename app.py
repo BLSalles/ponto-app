@@ -406,6 +406,14 @@ def colaborador_tem_registro_hoje(colaborador_id):
     return contar_registros_hoje(colaborador_id) > 0
 
 
+def eh_domingo(data):
+    """Domingo não é considerado dia útil padrão em nenhum lugar do sistema:
+    não gera lembrete, não conta como ausência/atraso, e se alguém trabalhar
+    mesmo assim, o dia inteiro vira hora extra (não só o que passar do horário
+    padrão) — é exceção à jornada normal, não parte dela."""
+    return data.weekday() == 6  # 0=segunda ... 6=domingo
+
+
 def contar_registros_hoje(colaborador_id):
     """Conta quantas batidas de ponto o colaborador já fez hoje (horário de Brasília)."""
     hoje = agora_brasilia().date()
@@ -454,7 +462,7 @@ def _horario_para_decimal(hhmm):
     return int(h) + int(m) / 60
 
 
-def calcular_horas_extras_dia(total_horas_decimal, horario_entrada_padrao, horario_saida_padrao):
+def calcular_horas_extras_dia(total_horas_decimal, horario_entrada_padrao, horario_saida_padrao, eh_domingo_flag=False):
     """Calcula a hora extra do dia.
 
     Regra: hora extra = (horas realmente trabalhadas no dia) - (duração padrão da
@@ -468,7 +476,14 @@ def calcular_horas_extras_dia(total_horas_decimal, horario_entrada_padrao, horar
 
     Se o resultado for negativo (trabalhou menos que a jornada padrão), a hora
     extra é zero — não vira "hora extra negativa" aqui, é só ausência de extra.
+
+    Domingo é EXCEÇÃO: como não é dia útil padrão, se o colaborador trabalhar mesmo
+    assim, o dia INTEIRO conta como hora extra (não só o que passar da jornada
+    padrão) — ele não tinha expectativa nenhuma de trabalhar naquele dia.
     """
+    if eh_domingo_flag:
+        return round(max(0.0, total_horas_decimal), 2)
+
     duracao_padrao = _horario_para_decimal(horario_saida_padrao) - _horario_para_decimal(horario_entrada_padrao)
     if duracao_padrao <= 0:
         duracao_padrao = 8.0  # salvaguarda, não deveria acontecer com horários válidos
@@ -561,6 +576,9 @@ def verificar_e_enviar_lembretes_push():
 
     try:
         with app.app_context():
+            if eh_domingo(agora_brasilia().date()):
+                return  # domingo não é dia útil padrão — sem lembrete de ponto
+
             config = obter_configuracao()
             agora_str = agora_brasilia().strftime("%H:%M")
             colaboradores = Colaborador.query.filter_by(is_gestor=False).all()
@@ -835,7 +853,8 @@ def meus_registros():
     total_extra_mes = 0.0
     for dia in resumo_diario:
         dia["horas_extras"] = calcular_horas_extras_dia(
-            dia["total_horas_decimal"], config.horario_entrada, config.horario_saida
+            dia["total_horas_decimal"], config.horario_entrada, config.horario_saida,
+            eh_domingo_flag=eh_domingo(dia["data"]),
         )
         if dia["data"].year == hoje.year and dia["data"].month == hoje.month:
             total_extra_mes += dia["horas_extras"]
@@ -940,7 +959,10 @@ def gestor_consulta():
         por_colaborador_hoje[r.colaborador_id].append(r)
 
     presentes = sum(1 for c in colaboradores if por_colaborador_hoje.get(c.id))
-    colaboradores_sem_registro_hoje = [c for c in colaboradores if not por_colaborador_hoje.get(c.id)]
+    hoje_eh_domingo = eh_domingo(hoje_brasilia)
+    colaboradores_sem_registro_hoje = [] if hoje_eh_domingo else [
+        c for c in colaboradores if not por_colaborador_hoje.get(c.id)
+    ]
 
     atrasados = 0
     entradas_por_hora = {}
@@ -949,7 +971,7 @@ def gestor_consulta():
         if not regs:
             continue
         primeira_hoje = para_brasilia(regs[0].data_hora)  # já vem ordenado asc
-        if primeira_hoje.strftime("%H:%M") > config.horario_entrada:
+        if not hoje_eh_domingo and primeira_hoje.strftime("%H:%M") > config.horario_entrada:
             atrasados += 1
         entradas_por_hora[primeira_hoje.hour] = entradas_por_hora.get(primeira_hoje.hour, 0) + 1
 
@@ -976,6 +998,7 @@ def gestor_consulta():
         horas_grafico=horas_grafico,
         contagem_grafico=contagem_grafico,
         registros_sem_endereco=registros_sem_endereco,
+        hoje_eh_domingo=hoje_eh_domingo,
     )
 
 
@@ -1357,7 +1380,10 @@ def _calcular_relatorio_horas_extras(ano, mes):
         total_horas_mes = 0.0
         dias_com_extra = []
         for dia in dias:
-            extra = calcular_horas_extras_dia(dia["total_horas_decimal"], config.horario_entrada, config.horario_saida)
+            extra = calcular_horas_extras_dia(
+                dia["total_horas_decimal"], config.horario_entrada, config.horario_saida,
+                eh_domingo_flag=eh_domingo(dia["data"]),
+            )
             total_extra += extra
             total_horas_mes += dia["total_horas_decimal"]
             if extra > 0:

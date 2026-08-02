@@ -35,7 +35,11 @@
   </div>
 </div>
 
-{% if colaboradores_sem_registro_hoje %}
+{% if hoje_eh_domingo %}
+<div class="card card-info">
+  <p class="aviso-sucesso" style="color: var(--cor-texto-suave);">📅 Hoje é domingo — sem expectativa de comparecimento (atrasos e ausências não são contados aos domingos).</p>
+</div>
+{% elif colaboradores_sem_registro_hoje %}
 <div class="card card-aviso">
   <div class="card-header">
     <h2>⚠️ Ainda não bateram ponto hoje</h2>

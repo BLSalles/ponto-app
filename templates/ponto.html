@@ -521,6 +521,12 @@ function dispararNotificacao(texto) {
 
 function verificarLembrete() {
   const agora = new Date();
+  const diaDaSemanaBR = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short' }).format(agora);
+  if (diaDaSemanaBR === 'Sun') {
+    bannerLembrete.style.display = 'none';
+    return; // domingo não é dia útil padrão — sem lembrete de ponto
+  }
+
   const horaAtualStr = new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false
   }).format(agora);
