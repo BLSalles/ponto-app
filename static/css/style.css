@@ -381,13 +381,15 @@ input[type="email"],
 input[type="password"],
 input[type="date"],
 input[type="time"],
+input[type="month"],
+input[type="number"],
 select,
 textarea {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--cor-borda);
   border-radius: var(--raio-pequeno);
-  font-size: 14px;
+  font-size: 16px;
   font-family: inherit;
   background: #fafafa;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -398,6 +400,8 @@ input[type="email"]:focus,
 input[type="password"]:focus,
 input[type="date"]:focus,
 input[type="time"]:focus,
+input[type="month"]:focus,
+input[type="number"]:focus,
 select:focus,
 textarea:focus {
   outline: none;
@@ -866,7 +870,7 @@ code {
   min-width: 180px;
 }
 
-.ajuste-form input[type="text"] { font-size: 13px; }
+.ajuste-form input[type="text"] { font-size: 16px; }
 
 .ajuste-botoes button {
   width: 100%;
