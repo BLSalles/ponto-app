@@ -138,6 +138,8 @@ html, body {
   gap: 4px;
   padding: 0 24px;
   overflow-x: auto;
+  -webkit-mask-image: linear-gradient(to right, black 0%, black 90%, transparent 100%);
+  mask-image: linear-gradient(to right, black 0%, black 90%, transparent 100%);
 }
 
 .subnav-link {
@@ -965,7 +967,16 @@ table a:hover { text-decoration: underline; }
 
 .celula-localizacao {
   white-space: normal;
-  max-width: 280px;
+  max-width: 220px;
+}
+
+.celula-localizacao a {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
 }
 
 .coordenadas-sub {
@@ -1687,5 +1698,8 @@ table a:hover { text-decoration: underline; }
   .topbar-subtitulo { display: none; }
   .conteudo { margin: 16px auto; }
   .ponto-clock { font-size: 34px; }
+  .subnav { padding: 0 14px; }
+  .subnav-link { padding: 12px 4px; margin-right: 14px; font-size: 13px; }
+  .subnav-icon { font-size: 14px; }
   .card { padding: 18px; }
 }
