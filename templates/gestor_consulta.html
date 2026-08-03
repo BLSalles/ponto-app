@@ -31,7 +31,7 @@
     <h2>Entradas por horário (hoje)</h2>
   </div>
   <div class="grafico-wrap">
-    <canvas id="grafico-entradas" height="90"></canvas>
+    <canvas id="grafico-entradas"></canvas>
   </div>
 </div>
 
@@ -162,6 +162,7 @@
     },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
         y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#eef0f3' } },

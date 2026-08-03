@@ -362,8 +362,11 @@ html, body {
 .stat-sucesso .stat-valor { color: var(--cor-sucesso); }
 
 .grafico-wrap {
+  position: relative;
   width: 100%;
   max-width: 100%;
+  height: 220px;
+  overflow: hidden;
 }
 
 /* ---------------------------------------------------------------------- */
