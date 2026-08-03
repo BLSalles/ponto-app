@@ -1,7 +1,7 @@
 {
   "name": "SmartPoint — Controle de Ponto",
   "short_name": "SmartPoint",
-  "start_url": "/ponto",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#0a2a6b",
   "theme_color": "#0f5fa8",

@@ -638,6 +638,10 @@ def verificar_e_enviar_lembretes_push():
 # ---------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index():
+    if "user_id" in session:
+        if session.get("is_gestor"):
+            return redirect(url_for("gestor_consulta"))
+        return redirect(url_for("ponto"))
     return redirect(url_for("login"))
 
 
@@ -731,6 +735,8 @@ def logout():
 @app.route("/ponto", methods=["GET"])
 @login_required
 def ponto():
+    if session.get("is_gestor"):
+        return redirect(url_for("gestor_consulta"))
     config = obter_configuracao()
     registros_hoje_count = contar_registros_hoje(session["user_id"])
 
