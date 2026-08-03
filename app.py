@@ -252,6 +252,9 @@ def filtro_clarear(cor_hex, fator=0.85):
         return f"#{r:02x}{g:02x}{b:02x}"
     except Exception:
         return cor_hex
+
+
+class PushSubscription(db.Model):
     """Inscrição de notificação push (Web Push) de um colaborador em um dispositivo/navegador."""
     id = db.Column(db.Integer, primary_key=True)
     colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
