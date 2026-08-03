@@ -173,6 +173,7 @@ html, body {
 .app-layout {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 @media (min-width: 900px) {
@@ -237,6 +238,8 @@ html, body {
   max-width: 880px;
   margin: 24px auto;
   padding: 0 16px 40px;
+  min-width: 0;
+  width: 100%;
 }
 
 .toast-container {
@@ -343,6 +346,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .stat-valor {
@@ -420,6 +424,10 @@ textarea { resize: vertical; margin-top: 4px; }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 0 16px;
+}
+
+.form-campo {
+  min-width: 0;
 }
 
 .captura-facial {
