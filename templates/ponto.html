@@ -152,43 +152,75 @@ const enderecoTexto = document.getElementById('endereco-texto');
 // a confiabilidade do registro.
 // ---------------------------------------------------------------------------
 let mapa = null;
+let marcadorMapa = null;
 
 function iniciarMapa(lat, lon) {
   if (mapa) return;
   mapa = L.map('mapa-local', { zoomControl: false, attributionControl: false }).setView([lat, lon], 17);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(mapa);
-  L.marker([lat, lon]).addTo(mapa);
+  marcadorMapa = L.marker([lat, lon]).addTo(mapa);
 }
 
-if (navigator.geolocation) {
-  navigator.geolocation.getCurrentPosition(
-    pos => {
-      latitude = pos.coords.latitude;
-      longitude = pos.coords.longitude;
-
-      iniciarMapa(latitude, longitude);
-      btnRegistrar.disabled = false;
-
-      fetch('/api/endereco-preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ latitude, longitude })
-      })
-        .then(r => r.json())
-        .then(data => {
-          enderecoTexto.textContent = data.endereco || 'Endereço não encontrado (coordenadas serão salvas mesmo assim).';
-        })
-        .catch(() => {
-          enderecoTexto.textContent = 'Não foi possível buscar o endereço (coordenadas serão salvas mesmo assim).';
-        });
-    },
-    () => {
-      enderecoTexto.textContent = 'Não foi possível obter sua localização. Verifique as permissões do navegador.';
+// ---------------------------------------------------------------------------
+// Captura de localização — precisa ser buscada DE NOVO a cada registro, não só
+// uma vez quando a página carrega. Se o colaborador deixa a aba/PWA aberta o
+// dia inteiro (comum em mobile), a 1ª captura (ex.: de manhã, em casa) ficava
+// nas variáveis globais `latitude`/`longitude` e era reaproveitada em todas as
+// batidas seguintes — inclusive a saída feita em outro lugar. Por isso essa
+// captura agora é uma função reutilizável, chamada no load (só pra habilitar o
+// botão e mostrar o mapa/endereço de forma antecipada) E de novo, sempre,
+// bem antes de cada registro efetivamente ser enviado (ver abrirModalFacial).
+// ---------------------------------------------------------------------------
+function capturarLocalizacao() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      enderecoTexto.textContent = 'Geolocalização não suportada neste navegador.';
+      reject(new Error('sem_suporte'));
+      return;
     }
-  );
-} else {
-  enderecoTexto.textContent = 'Geolocalização não suportada neste navegador.';
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        latitude = pos.coords.latitude;
+        longitude = pos.coords.longitude;
+
+        if (mapa) {
+          mapa.setView([latitude, longitude], 17);
+          marcadorMapa.setLatLng([latitude, longitude]);
+        } else {
+          iniciarMapa(latitude, longitude);
+        }
+        btnRegistrar.disabled = false;
+
+        enderecoTexto.innerHTML = '<span class="skeleton"></span>';
+        fetch('/api/endereco-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ latitude, longitude })
+        })
+          .then(r => r.json())
+          .then(data => {
+            enderecoTexto.textContent = data.endereco || 'Endereço não encontrado (coordenadas serão salvas mesmo assim).';
+          })
+          .catch(() => {
+            enderecoTexto.textContent = 'Não foi possível buscar o endereço (coordenadas serão salvas mesmo assim).';
+          });
+
+        resolve({ latitude, longitude });
+      },
+      err => {
+        // Falhou a atualização: mantém as últimas coordenadas conhecidas (se houver)
+        // em vez de travar o registro por causa de um erro pontual de GPS.
+        if (latitude === null || longitude === null) {
+          enderecoTexto.textContent = 'Não foi possível obter sua localização. Verifique as permissões do navegador.';
+        }
+        reject(err);
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+    );
+  });
 }
+
+capturarLocalizacao();
 
 let registrosHojeCount = {{ registros_hoje_count }};
 
@@ -237,7 +269,16 @@ function abrirModalFacial() {
   ovalAnel.className = 'oval-anel';
   modalFacial.classList.add('mostrar');
 
-  abrirCameraModal(facingModeAtual)
+  // Recaptura a localização agora, na hora H do registro — não usa mais só a
+  // posição obtida quando a página carregou (ver comentário em
+  // capturarLocalizacao). Se a nova captura falhar (ex.: GPS momentaneamente
+  // indisponível), segue com a última posição conhecida em vez de travar a
+  // batida por causa de um erro pontual — mas SEMPRE tenta buscar a atual.
+  capturarLocalizacao()
+    .catch(() => {})
+    .then(() => {
+      return abrirCameraModal(facingModeAtual);
+    })
     .then(() => {
       // Pequena espera para o vídeo estabilizar antes de capturar o quadro.
       setTimeout(() => {

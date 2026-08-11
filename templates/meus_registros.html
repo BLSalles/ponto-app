@@ -27,11 +27,17 @@
               — total estimado: {{ dia.total_horas }}
               {% if dia.horas_extras and dia.horas_extras > 0 %}
                 · +{{ dia.horas_extras | horas }} extra
+              {% elif dia.excepcional and dia.status_excepcional != 'aprovado' %}
+                · jornada acima do normal, aguardando revisão do gestor
               {% endif %}
             </span>
           </div>
           {% if dia.incompleto %}
-            <span class="badge badge-alerta">Incompleto</span>
+            <span class="badge badge-alerta">Incompleto (falta bater um ponto)</span>
+          {% elif dia.excepcional and dia.status_excepcional == 'pendente' %}
+            <span class="badge badge-alerta">⚠️ Aguardando aprovação</span>
+          {% elif dia.excepcional and dia.status_excepcional == 'recusado' %}
+            <span class="badge badge-erro">Jornada recusada</span>
           {% elif dia.horas_extras and dia.horas_extras > 0 %}
             <span class="badge badge-alerta">+{{ dia.horas_extras | horas }}</span>
           {% else %}

@@ -139,6 +139,31 @@ class SolicitacaoAjuste(db.Model):
     colaborador = db.relationship("Colaborador", backref="solicitacoes_ajuste")
 
 
+class AprovacaoJornadaExcepcional(db.Model):
+    """Registro de aprovação para dias em que a sessão trabalhada (entrada->saída) ultrapassou
+    LIMITE_HORAS_EXCEPCIONAL horas seguidas (ex.: virada de turno, esquecimento de bater saída
+    seguido de nova entrada 24h depois etc).
+
+    Enquanto não houver aprovação do gestor aqui, essas horas NÃO entram no total de hora extra
+    automaticamente — ficam visíveis (o colaborador e o gestor veem o total real trabalhado), mas
+    só contam pra folha depois de uma revisão humana. Isso evita que uma jornada fora do padrão
+    vire hora extra sozinha sem ninguém checar se foi real ou um esquecimento de bater o ponto."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    data_referencia = db.Column(db.Date, nullable=False)  # dia da ENTRADA da sessão excepcional
+    horas_total = db.Column(db.Float, nullable=False)  # horas trabalhadas nessa sessão, calculadas
+    status = db.Column(db.String(20), default="pendente")  # pendente | aprovado | recusado
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+    respondido_em = db.Column(db.DateTime, nullable=True)
+    resposta_gestor = db.Column(db.Text, nullable=True)
+
+    colaborador = db.relationship("Colaborador", backref="aprovacoes_jornada_excepcional")
+
+    __table_args__ = (
+        db.UniqueConstraint("colaborador_id", "data_referencia", name="uq_aprovacao_excepcional_colaborador_dia"),
+    )
+
+
 class ConfiguracaoJornada(db.Model):
     """Configuração única (definida pelo gestor) da jornada padrão e do lembrete de ponto."""
     id = db.Column(db.Integer, primary_key=True)
@@ -363,41 +388,58 @@ def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
     return encodings[0], None
 
 
-def obter_endereco(latitude, longitude):
+def obter_endereco(latitude, longitude, tentativas=2):
     """Converte latitude/longitude em um endereço legível via geocodificação reversa (Nominatim/OpenStreetMap).
-    Retorna None se as coordenadas não vierem ou se a consulta falhar (sem quebrar o registro do ponto) —
-    mas SEMPRE imprime o motivo da falha no log, para dar pra diagnosticar pelo Render."""
+    Retorna None se as coordenadas não vierem ou se todas as tentativas falharem (sem quebrar o
+    registro do ponto) — mas SEMPRE imprime o motivo da falha no log, para dar pra diagnosticar pelo
+    Render.
+
+    Faz até `tentativas` chamadas: o servidor público do Nominatim é instável sob carga/timeout
+    ocasional, e antes uma única falha (rede lenta, 429/503 momentâneo) já deixava o registro só
+    com lat/long salvos, sem endereço."""
     if latitude is None or longitude is None:
         return None
-    try:
-        resposta = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={
-                "format": "jsonv2",
-                "lat": latitude,
-                "lon": longitude,
-                "zoom": 18,
-                "addressdetails": 1,
-            },
-            headers={
-                # O Nominatim exige um User-Agent que identifique a aplicação (política de uso
-                # deles); sem isso as requisições podem ser bloqueadas silenciosamente.
-                "User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})",
-                "Accept-Language": "pt-BR",
-            },
-            timeout=8,
-        )
-        if resposta.status_code != 200:
-            print(f"[endereco] Nominatim respondeu {resposta.status_code} para ({latitude}, {longitude}): {resposta.text[:200]}")
-            return None
-        dados = resposta.json()
-        endereco = dados.get("display_name")
-        if not endereco:
-            print(f"[endereco] Nominatim não retornou display_name para ({latitude}, {longitude}): {dados}")
-        return endereco
-    except Exception as ex:
-        print(f"[endereco] falha ao geocodificar ({latitude}, {longitude}): {ex}")
-        return None
+
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            resposta = requests.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={
+                    "format": "jsonv2",
+                    "lat": latitude,
+                    "lon": longitude,
+                    "zoom": 18,
+                    "addressdetails": 1,
+                },
+                headers={
+                    # O Nominatim exige um User-Agent que identifique a aplicação (política de uso
+                    # deles); sem isso as requisições podem ser bloqueadas silenciosamente.
+                    "User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})",
+                    "Accept-Language": "pt-BR",
+                },
+                timeout=8,
+            )
+            if resposta.status_code != 200:
+                print(f"[endereco] tentativa {tentativa}/{tentativas}: Nominatim respondeu {resposta.status_code} para ({latitude}, {longitude}): {resposta.text[:200]}")
+                ultimo_erro = f"status {resposta.status_code}"
+                time.sleep(1)
+                continue
+            dados = resposta.json()
+            endereco = dados.get("display_name")
+            if not endereco:
+                print(f"[endereco] tentativa {tentativa}/{tentativas}: Nominatim não retornou display_name para ({latitude}, {longitude}): {dados}")
+                ultimo_erro = "sem display_name"
+                time.sleep(1)
+                continue
+            return endereco
+        except Exception as ex:
+            print(f"[endereco] tentativa {tentativa}/{tentativas}: falha ao geocodificar ({latitude}, {longitude}): {ex}")
+            ultimo_erro = str(ex)
+            time.sleep(1)
+
+    print(f"[endereco] desistindo após {tentativas} tentativas para ({latitude}, {longitude}): {ultimo_erro}")
+    return None
 
 
 # A janela e o intervalo do lembrete agora são configuráveis pelo gestor em
@@ -430,31 +472,71 @@ def contar_registros_hoje(colaborador_id):
     return sum(1 for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje)
 
 
-def montar_resumo_diario(registros):
-    """Agrupa registros por dia (Brasília) e estima horas trabalhadas pareando os horários
-    em ordem (1º=entrada, 2º=saída, 3º=entrada...). Sinaliza dias com número ímpar de batidas."""
-    from collections import defaultdict
-    import datetime as _dt
+LIMITE_HORAS_EXCEPCIONAL = 14.0  # sessão contínua (entrada->saída) acima disso não vira hora extra sozinha; fica pendente de aprovação do gestor
 
-    por_dia = defaultdict(list)
-    for r in registros:
+
+def montar_resumo_diario(registros):
+    """Agrupa os registros em sessões trabalhadas (entrada -> saída) e soma por dia (Brasília).
+
+    Antes, o pareamento era só por POSIÇÃO dentro do dia civil (1º=entrada, 2º=saída, 3º=entrada...),
+    ignorando o campo `tipo` que cada batida já guarda. Isso quebrava jornadas que viram a noite:
+    ex. entrou 08:00 de um dia e só saiu 07:00 do dia seguinte -> a "saída de virada" caía no balde
+    do dia seguinte e era confundida com a entrada normal daquele dia, deslocando todos os pares
+    seguintes e podendo gerar hora extra errada (às vezes bem grande) justamente no dia seguinte.
+
+    Agora o pareamento usa o `tipo` real de cada batida (entrada/saida) em ordem cronológica, e uma
+    sessão que atravessa a meia-noite é contada inteira no dia em que a ENTRADA aconteceu (convenção
+    comum de apuração de ponto: o dia de trabalho é o dia em que o turno começou)."""
+    from collections import defaultdict
+
+    registros_ordenados = sorted(registros, key=lambda r: r.data_hora)
+
+    por_dia = defaultdict(lambda: {"segundos": 0.0, "batidas": [], "incompleto": False, "excepcional": False})
+    entrada_aberta = None  # datetime local da entrada aguardando a saída correspondente
+
+    for r in registros_ordenados:
         dt_local = para_brasilia(r.data_hora)
-        por_dia[dt_local.date()].append(dt_local)
+        por_dia[dt_local.date()]["batidas"].append(dt_local)
+
+        tipo = (r.tipo or "").lower()
+        if tipo == "entrada":
+            if entrada_aberta is not None:
+                # entrada seguida de outra entrada, sem saída no meio: a anterior fica incompleta
+                por_dia[entrada_aberta.date()]["incompleto"] = True
+            entrada_aberta = dt_local
+        elif tipo == "saida":
+            if entrada_aberta is not None:
+                segundos = (dt_local - entrada_aberta).total_seconds()
+                if segundos > 0:
+                    por_dia[entrada_aberta.date()]["segundos"] += segundos
+                    if segundos / 3600 > LIMITE_HORAS_EXCEPCIONAL:
+                        por_dia[entrada_aberta.date()]["excepcional"] = True
+                else:
+                    por_dia[entrada_aberta.date()]["incompleto"] = True
+                entrada_aberta = None
+            else:
+                # saída sem entrada correspondente antes dela
+                por_dia[dt_local.date()]["incompleto"] = True
+        else:
+            # tipo desconhecido/legado: não dá pra parear com segurança
+            por_dia[dt_local.date()]["incompleto"] = True
+
+    if entrada_aberta is not None:
+        # última entrada do período ainda não teve saída (jornada em andamento, ou pendência real)
+        por_dia[entrada_aberta.date()]["incompleto"] = True
 
     resumo = []
-    for dia, horarios in sorted(por_dia.items(), reverse=True):
-        horarios = sorted(horarios)
-        total_segundos = 0
-        for i in range(0, len(horarios) - 1, 2):
-            total_segundos += (horarios[i + 1] - horarios[i]).total_seconds()
+    for dia, info in sorted(por_dia.items(), reverse=True):
+        total_segundos = info["segundos"]
         horas = int(total_segundos // 3600)
         minutos = int((total_segundos % 3600) // 60)
         resumo.append({
             "data": dia,
-            "batidas": horarios,
+            "batidas": sorted(info["batidas"]),
             "total_horas": f"{horas:02d}:{minutos:02d}",
             "total_horas_decimal": round(total_segundos / 3600, 2),
-            "incompleto": len(horarios) % 2 != 0,
+            "incompleto": info["incompleto"],
+            "excepcional": info["excepcional"],
         })
     return resumo
 
@@ -492,6 +574,40 @@ def calcular_horas_extras_dia(total_horas_decimal, horario_entrada_padrao, horar
         duracao_padrao = 8.0  # salvaguarda, não deveria acontecer com horários válidos
     extra = total_horas_decimal - duracao_padrao
     return max(0.0, round(extra, 2))
+
+
+def aplicar_status_excepcional(dia_resumo, colaborador_id):
+    """Se o dia foi marcado como 'excepcional' (sessão contínua acima de LIMITE_HORAS_EXCEPCIONAL),
+    garante que exista uma pendência de aprovação (cria se ainda não existir, idempotente pela
+    constraint única colaborador+data) e decide se a hora extra desse dia entra no total ou fica
+    zerada até o gestor aprovar.
+
+    O total de horas TRABALHADAS (`total_horas`/`total_horas_decimal`) nunca é escondido — o
+    colaborador e o gestor sempre veem o valor real. O que fica retido é só a hora extra calculada
+    a partir dele, pra não pagar/computar algo que ninguém revisou ainda."""
+    if not dia_resumo.get("excepcional"):
+        dia_resumo["status_excepcional"] = None
+        return dia_resumo
+
+    aprovacao = AprovacaoJornadaExcepcional.query.filter_by(
+        colaborador_id=colaborador_id, data_referencia=dia_resumo["data"]
+    ).first()
+    if aprovacao is None:
+        aprovacao = AprovacaoJornadaExcepcional(
+            colaborador_id=colaborador_id,
+            data_referencia=dia_resumo["data"],
+            horas_total=dia_resumo["total_horas_decimal"],
+            status="pendente",
+        )
+        db.session.add(aprovacao)
+        db.session.commit()
+
+    dia_resumo["status_excepcional"] = aprovacao.status
+    if aprovacao.status != "aprovado":
+        # hora extra fica retida até aprovação; o total de horas trabalhadas continua visível
+        dia_resumo["horas_extras_retidas"] = dia_resumo.get("horas_extras", 0.0)
+        dia_resumo["horas_extras"] = 0.0
+    return dia_resumo
 
 
 @app.template_filter("horas")
@@ -865,6 +981,7 @@ def meus_registros():
             dia["total_horas_decimal"], config.horario_entrada, config.horario_saida,
             eh_domingo_flag=eh_domingo(dia["data"]),
         )
+        aplicar_status_excepcional(dia, user.id)
         if dia["data"].year == hoje.year and dia["data"].month == hoje.month:
             total_extra_mes += dia["horas_extras"]
 
@@ -1393,14 +1510,19 @@ def _calcular_relatorio_horas_extras(ano, mes):
                 dia["total_horas_decimal"], config.horario_entrada, config.horario_saida,
                 eh_domingo_flag=eh_domingo(dia["data"]),
             )
+            dia["horas_extras"] = extra
+            aplicar_status_excepcional(dia, c.id)
+            extra = dia["horas_extras"]  # pode ter sido zerada por aplicar_status_excepcional
             total_extra += extra
             total_horas_mes += dia["total_horas_decimal"]
-            if extra > 0:
+            if extra > 0 or dia.get("excepcional"):
                 dias_com_extra.append({
                     "data": dia["data"],
                     "total_horas": dia["total_horas"],
                     "horas_extras": extra,
                     "incompleto": dia["incompleto"],
+                    "excepcional": dia.get("excepcional", False),
+                    "status_excepcional": dia.get("status_excepcional"),
                 })
         resumo_colaboradores.append({
             "colaborador": c,
@@ -1482,7 +1604,24 @@ def gestor_ajustes():
         .order_by(SolicitacaoAjuste.respondido_em.desc())
         .paginate(page=pagina, per_page=20, error_out=False)
     )
-    return render_template("gestor_ajustes.html", pendentes=pendentes, historico=historico)
+
+    # Jornadas excepcionais (sessão contínua > LIMITE_HORAS_EXCEPCIONAL) aguardando revisão —
+    # ver comentário em aplicar_status_excepcional(). Ficam nesta mesma tela de ajustes porque,
+    # do ponto de vista do gestor, é o mesmo tipo de decisão: revisar uma pendência de ponto.
+    pendentes_excepcionais = (
+        AprovacaoJornadaExcepcional.query
+        .filter_by(status="pendente")
+        .order_by(AprovacaoJornadaExcepcional.criado_em.asc())
+        .all()
+    )
+
+    return render_template(
+        "gestor_ajustes.html",
+        pendentes=pendentes,
+        historico=historico,
+        pendentes_excepcionais=pendentes_excepcionais,
+        limite_horas_excepcional=LIMITE_HORAS_EXCEPCIONAL,
+    )
 
 
 @app.route("/gestor/ajustes/<int:ajuste_id>/aprovar", methods=["POST"])
@@ -1537,6 +1676,42 @@ def recusar_ajuste(ajuste_id):
     db.session.commit()
 
     flash(f"Ajuste recusado para {solicitacao.colaborador.nome}.")
+    return redirect(url_for("gestor_ajustes"))
+
+
+@app.route("/gestor/jornadas-excepcionais/<int:aprovacao_id>/aprovar", methods=["POST"])
+@gestor_required
+def aprovar_jornada_excepcional(aprovacao_id):
+    aprovacao = AprovacaoJornadaExcepcional.query.get_or_404(aprovacao_id)
+
+    if aprovacao.status != "pendente":
+        flash("Esta jornada já foi revisada.")
+        return redirect(url_for("gestor_ajustes"))
+
+    aprovacao.status = "aprovado"
+    aprovacao.respondido_em = datetime.utcnow()
+    aprovacao.resposta_gestor = request.form.get("resposta", "").strip()
+    db.session.commit()
+
+    flash(f"Jornada excepcional de {aprovacao.colaborador.nome} em {aprovacao.data_referencia.strftime('%d/%m/%Y')} aprovada — a hora extra já entra no total do mês.")
+    return redirect(url_for("gestor_ajustes"))
+
+
+@app.route("/gestor/jornadas-excepcionais/<int:aprovacao_id>/recusar", methods=["POST"])
+@gestor_required
+def recusar_jornada_excepcional(aprovacao_id):
+    aprovacao = AprovacaoJornadaExcepcional.query.get_or_404(aprovacao_id)
+
+    if aprovacao.status != "pendente":
+        flash("Esta jornada já foi revisada.")
+        return redirect(url_for("gestor_ajustes"))
+
+    aprovacao.status = "recusado"
+    aprovacao.respondido_em = datetime.utcnow()
+    aprovacao.resposta_gestor = request.form.get("resposta", "").strip()
+    db.session.commit()
+
+    flash(f"Jornada excepcional de {aprovacao.colaborador.nome} em {aprovacao.data_referencia.strftime('%d/%m/%Y')} recusada — nenhuma hora extra será computada; peça ao colaborador para solicitar o ajuste correto do ponto.")
     return redirect(url_for("gestor_ajustes"))
 
 

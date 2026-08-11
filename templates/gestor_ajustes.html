@@ -3,6 +3,41 @@
 {% block titulo %}Ajustes - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
+{% if pendentes_excepcionais %}
+<div class="card">
+  <div class="card-header">
+    <h2>⚠️ Jornadas excepcionais pendentes</h2>
+  </div>
+  <p class="ajuste-motivo" style="margin-bottom: 1rem;">
+    Sessões contínuas (entrada → saída) acima de {{ limite_horas_excepcional | int }}h. Podem ser reais
+    (virada de turno) ou um esquecimento de bater o ponto — a hora extra desses dias só entra no
+    total depois da sua revisão.
+  </p>
+  {% for a in pendentes_excepcionais %}
+    <div class="ajuste-item">
+      <div class="ajuste-info">
+        <span class="colaborador-nome">{{ a.colaborador.nome }}</span>
+        <span class="colaborador-email">
+          {{ a.data_referencia.strftime('%d/%m/%Y') }} — {{ a.horas_total }}h trabalhadas nessa sessão
+        </span>
+      </div>
+      <form method="POST" action="{{ url_for('aprovar_jornada_excepcional', aprovacao_id=a.id) }}" class="ajuste-form">
+        <input type="text" name="resposta" placeholder="Comentário (opcional)">
+        <div class="ajuste-botoes">
+          <button type="submit" class="btn-primario btn-aprovar">✓ Aprovar</button>
+        </div>
+      </form>
+      <form method="POST" action="{{ url_for('recusar_jornada_excepcional', aprovacao_id=a.id) }}" class="ajuste-form">
+        <input type="text" name="resposta" placeholder="Motivo da recusa (opcional)">
+        <div class="ajuste-botoes">
+          <button type="submit" class="btn-secundario btn-recusar">✕ Recusar</button>
+        </div>
+      </form>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="card">
   <div class="card-header">
     <h2>Solicitações pendentes</h2>
