@@ -29,6 +29,10 @@
       </form>
       <form method="POST" action="{{ url_for('recusar_jornada_excepcional', aprovacao_id=a.id) }}" class="ajuste-form">
         <input type="text" name="resposta" placeholder="Motivo da recusa (opcional)">
+        <label style="display:flex; align-items:center; gap:.4rem; font-size:.85rem; margin: .3rem 0;">
+          <input type="checkbox" name="corrigir_saida_para_entrada" value="1" checked>
+          Foi esquecimento — corrigir a batida de saída para entrada
+        </label>
         <div class="ajuste-botoes">
           <button type="submit" class="btn-secundario btn-recusar">✕ Recusar</button>
         </div>

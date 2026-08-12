@@ -156,6 +156,8 @@ class AprovacaoJornadaExcepcional(db.Model):
     criado_em = db.Column(db.DateTime, default=datetime.utcnow)
     respondido_em = db.Column(db.DateTime, nullable=True)
     resposta_gestor = db.Column(db.Text, nullable=True)
+    registro_entrada_id = db.Column(db.Integer, db.ForeignKey("registro_ponto.id"), nullable=True)
+    registro_saida_id = db.Column(db.Integer, db.ForeignKey("registro_ponto.id"), nullable=True)
 
     colaborador = db.relationship("Colaborador", backref="aprovacoes_jornada_excepcional")
 
@@ -472,6 +474,28 @@ def contar_registros_hoje(colaborador_id):
     return sum(1 for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje)
 
 
+def determinar_proximo_tipo(colaborador_id):
+    """Decide se a PRÓXIMA batida desse colaborador é 'entrada' ou 'saida'.
+
+    Antes isso era decidido contando quantas batidas ele já tinha HOJE (par=entrada, ímpar=saída).
+    Isso quebra assim que uma sessão vira a noite: o contador reseta à meia-noite, então mesmo que
+    a última batida real (de madrugada) tenha sido uma "saida", o sistema via 1 batida "hoje" e
+    concluía (errado) que a próxima também seria "saida".
+
+    A regra certa não depende do dia: olha só o `tipo` da ÚLTIMA batida em qualquer dia. Se foi
+    "saida" (ou não há nenhuma batida ainda), a próxima é "entrada". Se foi "entrada", a próxima é
+    "saida" — não importa se isso aconteceu ontem, hoje, ou faz uma semana."""
+    ultimo = (
+        RegistroPonto.query
+        .filter_by(colaborador_id=colaborador_id)
+        .order_by(RegistroPonto.data_hora.desc())
+        .first()
+    )
+    if ultimo is None or (ultimo.tipo or "").lower() == "saida":
+        return "entrada"
+    return "saida"
+
+
 LIMITE_HORAS_EXCEPCIONAL = 14.0  # sessão contínua (entrada->saída) acima disso não vira hora extra sozinha; fica pendente de aprovação do gestor
 
 
@@ -491,8 +515,9 @@ def montar_resumo_diario(registros):
 
     registros_ordenados = sorted(registros, key=lambda r: r.data_hora)
 
-    por_dia = defaultdict(lambda: {"segundos": 0.0, "batidas": [], "incompleto": False, "excepcional": False})
+    por_dia = defaultdict(lambda: {"segundos": 0.0, "batidas": [], "incompleto": False, "excepcional": False, "excepcional_entrada_id": None, "excepcional_saida_id": None})
     entrada_aberta = None  # datetime local da entrada aguardando a saída correspondente
+    entrada_aberta_id = None  # id do RegistroPonto dessa entrada, pra poder corrigi-lo depois se preciso
 
     for r in registros_ordenados:
         dt_local = para_brasilia(r.data_hora)
@@ -504,6 +529,7 @@ def montar_resumo_diario(registros):
                 # entrada seguida de outra entrada, sem saída no meio: a anterior fica incompleta
                 por_dia[entrada_aberta.date()]["incompleto"] = True
             entrada_aberta = dt_local
+            entrada_aberta_id = r.id
         elif tipo == "saida":
             if entrada_aberta is not None:
                 segundos = (dt_local - entrada_aberta).total_seconds()
@@ -511,9 +537,15 @@ def montar_resumo_diario(registros):
                     por_dia[entrada_aberta.date()]["segundos"] += segundos
                     if segundos / 3600 > LIMITE_HORAS_EXCEPCIONAL:
                         por_dia[entrada_aberta.date()]["excepcional"] = True
+                        # guarda os dois registros que formaram essa sessão longa: se o gestor
+                        # recusar (era esquecimento, não virada real), é a batida de SAÍDA que
+                        # precisa virar ENTRADA (ver recusar_jornada_excepcional).
+                        por_dia[entrada_aberta.date()]["excepcional_entrada_id"] = entrada_aberta_id
+                        por_dia[entrada_aberta.date()]["excepcional_saida_id"] = r.id
                 else:
                     por_dia[entrada_aberta.date()]["incompleto"] = True
                 entrada_aberta = None
+                entrada_aberta_id = None
             else:
                 # saída sem entrada correspondente antes dela
                 por_dia[dt_local.date()]["incompleto"] = True
@@ -537,6 +569,8 @@ def montar_resumo_diario(registros):
             "total_horas_decimal": round(total_segundos / 3600, 2),
             "incompleto": info["incompleto"],
             "excepcional": info["excepcional"],
+            "excepcional_entrada_id": info["excepcional_entrada_id"],
+            "excepcional_saida_id": info["excepcional_saida_id"],
         })
     return resumo
 
@@ -598,6 +632,8 @@ def aplicar_status_excepcional(dia_resumo, colaborador_id):
             data_referencia=dia_resumo["data"],
             horas_total=dia_resumo["total_horas_decimal"],
             status="pendente",
+            registro_entrada_id=dia_resumo.get("excepcional_entrada_id"),
+            registro_saida_id=dia_resumo.get("excepcional_saida_id"),
         )
         db.session.add(aprovacao)
         db.session.commit()
@@ -707,11 +743,14 @@ def verificar_e_enviar_lembretes_push():
                 if not colaborador.push_subscriptions:
                     continue
 
-                count = contar_registros_hoje(colaborador.id)
+                # Mesma correção de determinar_proximo_tipo: não conta batidas "de hoje" (isso
+                # reseta à meia-noite), olha o tipo da última batida real do colaborador.
+                proximo_tipo = determinar_proximo_tipo(colaborador.id)
+                bateu_hoje = contar_registros_hoje(colaborador.id) > 0
                 pendencia = None
-                if count == 0 and agora_str >= config.horario_entrada:
+                if proximo_tipo == "entrada" and not bateu_hoje and agora_str >= config.horario_entrada:
                     pendencia = "entrada"
-                elif count % 2 == 1 and agora_str >= config.horario_saida:
+                elif proximo_tipo == "saida" and agora_str >= config.horario_saida:
                     pendencia = "saida"
 
                 if not pendencia:
@@ -928,7 +967,7 @@ def registrar_ponto():
     endereco = obter_endereco(latitude, longitude)
 
     registros_hoje_count = contar_registros_hoje(user.id)
-    tipo_registro = "entrada" if registros_hoje_count % 2 == 0 else "saida"
+    tipo_registro = determinar_proximo_tipo(user.id)
 
     registro = RegistroPonto(
         colaborador_id=user.id,
@@ -1709,9 +1748,25 @@ def recusar_jornada_excepcional(aprovacao_id):
     aprovacao.status = "recusado"
     aprovacao.respondido_em = datetime.utcnow()
     aprovacao.resposta_gestor = request.form.get("resposta", "").strip()
+
+    # Recusar aqui normalmente significa "isso não foi uma virada de turno real, foi um
+    # esquecimento de bater a saída". Nesse caso, a batida que HOJE está marcada como "saida"
+    # (porque fechou a sessão gigante) na verdade era a entrada normal do dia seguinte — o
+    # colaborador só chegou pro trabalho e bateu o ponto, e o sistema confundiu isso com o
+    # fechamento de um turno de madrugada. Corrigimos o tipo dela pra "entrada", que é o que
+    # realmente aconteceu. A entrada original (do dia anterior) continua sem saída registrada —
+    # isso fica sinalizado como "incompleto" e precisa de uma SolicitacaoAjuste normal pra
+    # preencher o horário real em que a pessoa foi embora naquele dia.
+    corrigir = request.form.get("corrigir_saida_para_entrada", "0") == "1"
+    if corrigir and aprovacao.registro_saida_id:
+        registro_saida = RegistroPonto.query.get(aprovacao.registro_saida_id)
+        if registro_saida is not None and (registro_saida.tipo or "").lower() == "saida":
+            registro_saida.tipo = "entrada"
+            registro_saida.origem = "ajuste_manual"
+
     db.session.commit()
 
-    flash(f"Jornada excepcional de {aprovacao.colaborador.nome} em {aprovacao.data_referencia.strftime('%d/%m/%Y')} recusada — nenhuma hora extra será computada; peça ao colaborador para solicitar o ajuste correto do ponto.")
+    flash(f"Jornada excepcional de {aprovacao.colaborador.nome} em {aprovacao.data_referencia.strftime('%d/%m/%Y')} recusada — nenhuma hora extra será computada. A batida que fechava a sessão foi corrigida para 'entrada'; falta um ajuste manual com o horário real de saída do dia {aprovacao.data_referencia.strftime('%d/%m/%Y')}.")
     return redirect(url_for("gestor_ajustes"))
 
 
