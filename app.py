@@ -1648,6 +1648,23 @@ def exportar_csv_horas_extras():
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={nome_arquivo}"},
     )
+def _listar_pendentes_excepcionais():
+    """Busca as jornadas excepcionais pendentes de aprovação. Nunca deixa a tabela ainda não
+    existir (banco recém-migrado) derrubar a tela — se a consulta falhar, loga e retorna lista
+    vazia (a seção correspondente simplesmente não aparece, em vez de dar 500)."""
+    try:
+        return (
+            AprovacaoJornadaExcepcional.query
+            .filter_by(status="pendente")
+            .order_by(AprovacaoJornadaExcepcional.criado_em.asc())
+            .all()
+        )
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[jornada-excepcional] falha ao listar pendências: {ex}")
+        return []
+
+
 @app.route("/gestor/ajustes", methods=["GET"])
 @gestor_required
 def gestor_ajustes():
@@ -1668,12 +1685,8 @@ def gestor_ajustes():
     # Jornadas excepcionais (sessão contínua > LIMITE_HORAS_EXCEPCIONAL) aguardando revisão —
     # ver comentário em aplicar_status_excepcional(). Ficam nesta mesma tela de ajustes porque,
     # do ponto de vista do gestor, é o mesmo tipo de decisão: revisar uma pendência de ponto.
-    pendentes_excepcionais = (
-        AprovacaoJornadaExcepcional.query
-        .filter_by(status="pendente")
-        .order_by(AprovacaoJornadaExcepcional.criado_em.asc())
-        .all()
-    )
+    # Protegido contra a tabela ainda não existir no banco (ver _listar_pendentes_excepcionais).
+    pendentes_excepcionais = _listar_pendentes_excepcionais()
 
     return render_template(
         "gestor_ajustes.html",
@@ -1851,6 +1864,17 @@ def _garantir_colunas_novas():
             comandos.append("ALTER TABLE configuracao_marca ADD COLUMN logo_login_base64 TEXT")
         if "logo_topbar_base64" not in colunas_marca:
             comandos.append("ALTER TABLE configuracao_marca ADD COLUMN logo_topbar_base64 TEXT")
+
+    # aprovacao_jornada_excepcional foi criada num deploy anterior ao das colunas
+    # registro_entrada_id/registro_saida_id — como db.create_all() só cria tabelas que ainda não
+    # existem (nunca altera uma tabela já existente), essas colunas ficaram faltando em produção
+    # e quebravam a tela de ajustes com "UndefinedColumn". Adiciona aqui se faltarem.
+    if "aprovacao_jornada_excepcional" in inspector.get_table_names():
+        colunas_aprovacao = [col["name"] for col in inspector.get_columns("aprovacao_jornada_excepcional")]
+        if "registro_entrada_id" not in colunas_aprovacao:
+            comandos.append("ALTER TABLE aprovacao_jornada_excepcional ADD COLUMN registro_entrada_id INTEGER REFERENCES registro_ponto(id)")
+        if "registro_saida_id" not in colunas_aprovacao:
+            comandos.append("ALTER TABLE aprovacao_jornada_excepcional ADD COLUMN registro_saida_id INTEGER REFERENCES registro_ponto(id)")
 
     if comandos:
         with db.engine.connect() as conn:
