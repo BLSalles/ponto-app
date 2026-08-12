@@ -618,28 +618,49 @@ def aplicar_status_excepcional(dia_resumo, colaborador_id):
 
     O total de horas TRABALHADAS (`total_horas`/`total_horas_decimal`) nunca é escondido — o
     colaborador e o gestor sempre veem o valor real. O que fica retido é só a hora extra calculada
-    a partir dele, pra não pagar/computar algo que ninguém revisou ainda."""
+    a partir dele, pra não pagar/computar algo que ninguém revisou ainda.
+
+    Esta função NUNCA pode derrubar a tela de registros/ajustes com um 500: qualquer erro de banco
+    aqui (tabela ainda não migrada, corrida de duas requisições tentando criar a mesma pendência ao
+    mesmo tempo, etc.) é capturado, logado, e tratado de forma segura — o dia fica com hora extra
+    retida (mesmo comportamento de 'pendente'), mas a página continua funcionando normalmente."""
     if not dia_resumo.get("excepcional"):
         dia_resumo["status_excepcional"] = None
         return dia_resumo
 
-    aprovacao = AprovacaoJornadaExcepcional.query.filter_by(
-        colaborador_id=colaborador_id, data_referencia=dia_resumo["data"]
-    ).first()
-    if aprovacao is None:
-        aprovacao = AprovacaoJornadaExcepcional(
-            colaborador_id=colaborador_id,
-            data_referencia=dia_resumo["data"],
-            horas_total=dia_resumo["total_horas_decimal"],
-            status="pendente",
-            registro_entrada_id=dia_resumo.get("excepcional_entrada_id"),
-            registro_saida_id=dia_resumo.get("excepcional_saida_id"),
-        )
-        db.session.add(aprovacao)
-        db.session.commit()
+    status = "pendente"
+    try:
+        aprovacao = AprovacaoJornadaExcepcional.query.filter_by(
+            colaborador_id=colaborador_id, data_referencia=dia_resumo["data"]
+        ).first()
+        if aprovacao is None:
+            aprovacao = AprovacaoJornadaExcepcional(
+                colaborador_id=colaborador_id,
+                data_referencia=dia_resumo["data"],
+                horas_total=dia_resumo["total_horas_decimal"],
+                status="pendente",
+                registro_entrada_id=dia_resumo.get("excepcional_entrada_id"),
+                registro_saida_id=dia_resumo.get("excepcional_saida_id"),
+            )
+            db.session.add(aprovacao)
+            try:
+                db.session.commit()
+            except Exception:
+                # duas requisições tentaram criar a mesma pendência ao mesmo tempo (corrida) —
+                # desfaz e busca a que já foi criada pela outra requisição.
+                db.session.rollback()
+                aprovacao = AprovacaoJornadaExcepcional.query.filter_by(
+                    colaborador_id=colaborador_id, data_referencia=dia_resumo["data"]
+                ).first()
+        if aprovacao is not None:
+            status = aprovacao.status
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[jornada-excepcional] falha ao registrar/consultar pendência (colaborador {colaborador_id}, dia {dia_resumo.get('data')}): {ex}")
+        # segue com status "pendente" (fail-safe): retém a hora extra sem quebrar a página
 
-    dia_resumo["status_excepcional"] = aprovacao.status
-    if aprovacao.status != "aprovado":
+    dia_resumo["status_excepcional"] = status
+    if status != "aprovado":
         # hora extra fica retida até aprovação; o total de horas trabalhadas continua visível
         dia_resumo["horas_extras_retidas"] = dia_resumo.get("horas_extras", 0.0)
         dia_resumo["horas_extras"] = 0.0
