@@ -1714,3 +1714,217 @@ table a:hover { text-decoration: underline; }
   .subnav-icon { font-size: 14px; }
   .card { padding: 18px; }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Assistente do gestor (pergunta por voz ou texto)                        */
+/* ---------------------------------------------------------------------- */
+.assistente-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.assistente-conversa {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px 20px 8px;
+  min-height: 260px;
+  max-height: 52vh;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+
+.assistente-vazio {
+  margin: auto;
+  text-align: center;
+  color: var(--cor-texto-suave);
+  font-size: 14px;
+}
+
+.assistente-vazio-icone {
+  font-size: 30px;
+  display: block;
+  margin-bottom: 6px;
+  opacity: 0.65;
+}
+
+.assistente-sugestoes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.assistente-sugestao {
+  background: var(--cor-primaria-clara);
+  color: var(--cor-primaria-escura);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  margin: 0;                       /* anula o margin-top global de 'button' */
+  padding: 8px 14px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.assistente-sugestao:hover {
+  border-color: var(--cor-primaria);
+  transform: translateY(-1px);
+}
+
+.assistente-bolha {
+  max-width: 86%;
+  padding: 11px 15px;
+  border-radius: 16px;
+  font-size: 14.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  animation: entrarSuave 0.25s ease both;
+}
+
+.assistente-usuario {
+  align-self: flex-end;
+  background: var(--cor-primaria);
+  color: #fff;
+  border-bottom-right-radius: 5px;
+}
+
+.assistente-claude {
+  align-self: flex-start;
+  background: var(--cor-fundo);
+  border: 1px solid var(--cor-borda);
+  border-bottom-left-radius: 5px;
+}
+
+.assistente-erro {
+  align-self: flex-start;
+  background: var(--cor-erro-fundo);
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  border-bottom-left-radius: 5px;
+}
+
+.assistente-nota {
+  display: block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--cor-texto-suave);
+}
+
+.assistente-pensando {
+  color: var(--cor-texto-suave);
+  letter-spacing: 3px;
+  animation: pulsarPensando 1.1s ease-in-out infinite;
+}
+
+@keyframes pulsarPensando {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+.assistente-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--cor-borda);
+  background: var(--cor-superficie);
+}
+
+.assistente-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--cor-borda);
+  border-radius: 999px;
+  font-size: 15px;      /* 16px+ evita o zoom automático do iOS ao focar */
+  font-family: inherit;
+  background: var(--cor-fundo);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.assistente-form input[type="text"]:focus {
+  border-color: var(--cor-primaria);
+  background: var(--cor-superficie);
+}
+
+.assistente-mic,
+.assistente-enviar {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--cor-borda);
+  background: var(--cor-superficie);
+  color: var(--cor-texto-suave);
+  /* o CSS global de 'button' aplica padding 11px 20px e margin-top 18px —
+     aqui o botão é redondo e do tamanho do ícone, então zeramos os dois. */
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.assistente-mic svg,
+.assistente-enviar svg {
+  flex: 0 0 auto;
+  width: 21px;
+  height: 21px;
+}
+
+.assistente-mic:hover,
+.assistente-enviar:hover {
+  border-color: var(--cor-primaria);
+  color: var(--cor-primaria);
+}
+
+.assistente-enviar {
+  background: var(--cor-primaria);
+  border-color: var(--cor-primaria);
+  color: #fff;
+}
+
+.assistente-enviar:hover { color: #fff; background: var(--cor-primaria-escura); }
+.assistente-enviar:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.assistente-mic.gravando {
+  background: var(--cor-erro);
+  border-color: var(--cor-erro);
+  color: #fff;
+  animation: pulsarMic 1.3s ease-in-out infinite;
+}
+
+@keyframes pulsarMic {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+  50% { box-shadow: 0 0 0 9px rgba(220, 38, 38, 0); }
+}
+
+.assistente-rodape {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 20px 16px;
+  font-size: 12.5px;
+  color: var(--cor-texto-suave);
+}
+
+.assistente-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.assistente-status { font-style: italic; }

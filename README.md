@@ -40,6 +40,71 @@ O reconhecimento facial usa a biblioteca `face_recognition`, que depende do
 dependências de sistema. O build padrão do Render (buildpack Python) não
 inclui essas ferramentas, por isso o deploy é feito via Dockerfile.
 
+## Assistente do gestor (perguntas por voz ou texto)
+
+O painel do gestor tem uma aba **Assistente**, onde ele pergunta com as próprias
+palavras — falando ou digitando — coisas como:
+
+- "Quantas horas extras o Alex tem esse mês?"
+- "Quantos dias a Maria ficou sem bater ponto?"
+- "A que horas o João entrou ontem?"
+- "Quem chegou atrasado hoje?"
+- "Tem alguma coisa pendente pra eu aprovar?"
+
+### Como ligar
+
+1. Crie uma chave em <https://console.anthropic.com> (Settings → API Keys) e
+   coloque créditos na conta.
+2. Defina a variável de ambiente no servidor:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export ANTHROPIC_MODEL="claude-haiku-4-5-20251001"   # opcional
+```
+
+   No Render: **Environment → Add Environment Variable** e reinicie o serviço.
+3. Instale a dependência nova (`pip install -r requirements.txt`) e pronto — o
+   item "Assistente" aparece sozinho no menu do gestor.
+
+Sem a chave o app funciona exatamente como antes; a página do assistente só
+avisa que está desligada.
+
+### Como funciona por dentro (`assistente.py`)
+
+A pergunta vai para a API da Anthropic junto com a descrição de **cinco
+ferramentas** de leitura: `listar_colaboradores`, `horas_extras`, `ausencias`,
+`registros_do_periodo` e `situacao_agora`. O modelo **não vê o banco e não
+escreve SQL** — ele só escolhe a ferramenta e os argumentos. Quem consulta é o
+próprio `assistente.py`, chamando as mesmas funções que já alimentam as telas
+(`_calcular_relatorio_horas_extras`, `montar_resumo_diario`,
+`calcular_horas_extras_dia`). Por isso o número que o assistente responde é, por
+construção, igual ao da tela de Horas Extras.
+
+A voz é do próprio navegador (Web Speech API): o áudio não passa pelo servidor,
+chega aqui já como texto, e a resposta pode ser lida em voz alta. Funciona no
+Chrome, Edge, Android e Safari recente; em navegador sem suporte, o microfone
+some e o campo de texto continua funcionando.
+
+Para conferir as ferramentas sem gastar chamada de API:
+
+```python
+from app import app
+with app.app_context():
+    exec_ = app.blueprints["assistente"].executores
+    print(exec_["horas_extras"]({"nome": "Alex"}))
+```
+
+### Cuidados
+
+- Só o gestor logado acessa (mesmo `gestor_required` do resto do painel).
+- A chave da API fica no servidor; o navegador nunca a recebe.
+- O assistente é **somente leitura** — não aprova ajuste nem altera registro.
+- "Faltas" aqui significa *dia útil sem nenhuma batida*: o sistema não tem
+  cadastro de férias, atestado nem feriado, e o assistente é instruído a
+  deixar essa ressalva clara sempre que responder sobre ausências.
+- Custo: com o modelo Haiku, cada pergunta sai por poucos centavos — a
+  resposta é curta e o histórico enviado fica limitado às últimas mensagens.
+
 ## Limitações desta versão simples (V1)
 
 - Banco de dados gratuito do Render tem limite de armazenamento e expira

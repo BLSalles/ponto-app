@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block titulo %}Assistente - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Assistente</h2>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    Pergunte com suas palavras — falando ou digitando — sobre horas extras, ausências,
+    atrasos e o dia de hoje. As respostas saem dos mesmos cálculos das telas do painel.
+  </p>
+
+  {% if not habilitado %}
+    <div class="card-aviso" style="margin-top:14px;">
+      <strong>Assistente desligado.</strong>
+      Defina a variável de ambiente <code>ANTHROPIC_API_KEY</code> no servidor
+      (no Render: Environment → Add Environment Variable) e reinicie o serviço.
+    </div>
+  {% endif %}
+</div>
+
+<div class="card assistente-card">
+  <div id="assistente-conversa" class="assistente-conversa" aria-live="polite">
+    <div class="assistente-vazio">
+      <span class="assistente-vazio-icone">💬</span>
+      <p>Experimente perguntar:</p>
+      <div class="assistente-sugestoes">
+        <button type="button" class="assistente-sugestao">Quantas horas extras o Alex tem esse mês?</button>
+        <button type="button" class="assistente-sugestao">Quem chegou atrasado hoje?</button>
+        <button type="button" class="assistente-sugestao">Teve algum dia sem batida esse mês?</button>
+        <button type="button" class="assistente-sugestao">Tem alguma coisa pendente pra eu aprovar?</button>
+      </div>
+    </div>
+  </div>
+
+  <form id="assistente-form" class="assistente-form" autocomplete="off">
+    <button type="button" id="btn-microfone" class="assistente-mic" title="Perguntar por voz" aria-label="Perguntar por voz">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 15.5a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v6a3.5 3.5 0 0 0 3.5 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M5.5 11.5A6.5 6.5 0 0 0 12 18m6.5-6.5A6.5 6.5 0 0 1 12 18m0 0v3.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <input type="text" id="assistente-pergunta" placeholder="Pergunte alguma coisa…" maxlength="500" {% if not habilitado %}disabled{% endif %}>
+    <button type="submit" id="btn-enviar" class="assistente-enviar" aria-label="Enviar" {% if not habilitado %}disabled{% endif %}>
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M4 12 20 4l-3.2 8L20 20 4 12Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </form>
+
+  <div class="assistente-rodape">
+    <label class="assistente-toggle">
+      <input type="checkbox" id="assistente-falar"> Ler as respostas em voz alta
+    </label>
+    <span id="assistente-status" class="assistente-status"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const conversa   = document.getElementById('assistente-conversa');
+  const form       = document.getElementById('assistente-form');
+  const campo      = document.getElementById('assistente-pergunta');
+  const btnMic     = document.getElementById('btn-microfone');
+  const btnEnviar  = document.getElementById('btn-enviar');
+  const chkFalar   = document.getElementById('assistente-falar');
+  const status     = document.getElementById('assistente-status');
+  const habilitado = {{ 'true' if habilitado else 'false' }};
+
+  // Histórico enviado junto com a próxima pergunta, para o assistente entender
+  // "e no mês passado?" logo depois de "quantas horas extras o Alex tem?".
+  let historico = [];
+  let ocupado = false;
+
+  // ---------------------------------------------------------------- bolhas
+  function limparVazio() {
+    const vazio = conversa.querySelector('.assistente-vazio');
+    if (vazio) vazio.remove();
+  }
+
+  function adicionarBolha(texto, quem, extra) {
+    limparVazio();
+    const bolha = document.createElement('div');
+    bolha.className = 'assistente-bolha assistente-' + quem;
+    bolha.textContent = texto;
+    if (extra) {
+      const nota = document.createElement('span');
+      nota.className = 'assistente-nota';
+      nota.textContent = extra;
+      bolha.appendChild(nota);
+    }
+    conversa.appendChild(bolha);
+    conversa.scrollTop = conversa.scrollHeight;
+    return bolha;
+  }
+
+  // ------------------------------------------------------------- pergunta
+  async function perguntar(texto) {
+    if (!texto || ocupado || !habilitado) return;
+    ocupado = true;
+    campo.value = '';
+    adicionarBolha(texto, 'usuario');
+
+    const pensando = adicionarBolha('…', 'claude');
+    pensando.classList.add('assistente-pensando');
+    btnEnviar.disabled = true;
+
+    try {
+      const resposta = await fetch("{{ url_for('assistente.api_perguntar') }}", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pergunta: texto, historico: historico })
+      });
+      // Se a sessão expirou, o Flask redireciona para o login e volta HTML.
+      const tipo = resposta.headers.get('content-type') || '';
+      if (!tipo.includes('application/json')) {
+        pensando.remove();
+        adicionarBolha('Sua sessão expirou. Recarregue a página e entre de novo.', 'erro');
+        return;
+      }
+      const dados = await resposta.json();
+      pensando.remove();
+
+      if (dados.erro) {
+        adicionarBolha(dados.erro, 'erro');
+      } else {
+        const usadas = (dados.ferramentas_usadas || []);
+        const nota = usadas.length ? 'consultou: ' + [...new Set(usadas)].join(', ') : '';
+        adicionarBolha(dados.resposta, 'claude', nota);
+        historico.push({ role: 'user', content: texto });
+        historico.push({ role: 'assistant', content: dados.resposta });
+        historico = historico.slice(-8);
+        if (chkFalar.checked) falar(dados.resposta);
+      }
+    } catch (e) {
+      pensando.remove();
+      adicionarBolha('Sem conexão com o servidor. Tente de novo.', 'erro');
+    } finally {
+      ocupado = false;
+      btnEnviar.disabled = false;
+      campo.focus();
+    }
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    perguntar(campo.value.trim());
+  });
+
+  conversa.addEventListener('click', function (e) {
+    const sugestao = e.target.closest('.assistente-sugestao');
+    if (sugestao) perguntar(sugestao.textContent.trim());
+  });
+
+  // ------------------------------------------------- voz: falar a pergunta
+  // Reconhecimento nativo do navegador (Chrome, Edge, Safari recente e Android).
+  // Não custa nada e não envia áudio para o nosso servidor — o navegador já
+  // devolve o texto pronto.
+  const Reconhecimento = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let reconhecedor = null;
+  let ouvindo = false;
+
+  if (Reconhecimento && habilitado) {
+    reconhecedor = new Reconhecimento();
+    reconhecedor.lang = 'pt-BR';
+    reconhecedor.continuous = false;
+    reconhecedor.interimResults = true;
+
+    reconhecedor.onstart = function () {
+      ouvindo = true;
+      btnMic.classList.add('gravando');
+      status.textContent = 'Ouvindo…';
+    };
+    reconhecedor.onresult = function (evento) {
+      let parcial = '';
+      let finalizado = '';
+      for (let i = evento.resultIndex; i < evento.results.length; i++) {
+        const trecho = evento.results[i][0].transcript;
+        if (evento.results[i].isFinal) finalizado += trecho;
+        else parcial += trecho;
+      }
+      campo.value = (finalizado || parcial).trim();
+      if (finalizado.trim()) {
+        pararDeOuvir();
+        perguntar(finalizado.trim());
+      }
+    };
+    reconhecedor.onerror = function (evento) {
+      pararDeOuvir();
+      if (evento.error === 'not-allowed' || evento.error === 'service-not-allowed') {
+        status.textContent = 'Permissão de microfone negada.';
+      } else if (evento.error === 'no-speech') {
+        status.textContent = 'Não ouvi nada. Tente de novo.';
+      } else {
+        status.textContent = 'Não consegui usar o microfone.';
+      }
+    };
+    reconhecedor.onend = pararDeOuvir;
+
+    btnMic.addEventListener('click', function () {
+      if (ouvindo) { reconhecedor.stop(); return; }
+      // Interrompe uma leitura em voz alta antes de começar a ouvir.
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      try { reconhecedor.start(); } catch (e) { /* já estava iniciando */ }
+    });
+  } else {
+    btnMic.style.display = 'none';
+    if (habilitado) status.textContent = 'Este navegador não reconhece voz — use o campo de texto.';
+  }
+
+  function pararDeOuvir() {
+    ouvindo = false;
+    btnMic.classList.remove('gravando');
+    if (status.textContent === 'Ouvindo…') status.textContent = '';
+  }
+
+  // ------------------------------------------- voz: ler a resposta em voz alta
+  function falar(texto) {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const fala = new SpeechSynthesisUtterance(texto);
+    fala.lang = 'pt-BR';
+    fala.rate = 1.05;
+    const vozPt = window.speechSynthesis.getVoices().find(v => v.lang && v.lang.toLowerCase().startsWith('pt'));
+    if (vozPt) fala.voice = vozPt;
+    window.speechSynthesis.speak(fala);
+  }
+
+  // Lembra a preferência de leitura em voz alta neste aparelho.
+  try {
+    chkFalar.checked = localStorage.getItem('assistente_falar') === '1';
+    chkFalar.addEventListener('change', function () {
+      localStorage.setItem('assistente_falar', chkFalar.checked ? '1' : '0');
+      if (!chkFalar.checked && window.speechSynthesis) window.speechSynthesis.cancel();
+    });
+  } catch (e) { /* navegador com storage bloqueado: segue sem lembrar */ }
+})();
+</script>
+
+{% endblock %}

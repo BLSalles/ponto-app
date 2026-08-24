@@ -78,6 +78,11 @@
       <a class="subnav-link {% if request.endpoint == 'gestor_horas_extras' %}active{% endif %}" href="{{ url_for('gestor_horas_extras') }}">
         <span class="subnav-icon">⏳</span> Horas Extras
       </a>
+      {% if assistente_disponivel %}
+        <a class="subnav-link {% if request.endpoint == 'assistente.gestor_assistente' %}active{% endif %}" href="{{ url_for('assistente.gestor_assistente') }}">
+          <span class="subnav-icon">💬</span> Assistente
+        </a>
+      {% endif %}
       <a class="subnav-link {% if request.endpoint == 'gestor_configuracoes' %}active{% endif %}" href="{{ url_for('gestor_configuracoes') }}">
         <span class="subnav-icon">⚙️</span> Configurações
       </a>

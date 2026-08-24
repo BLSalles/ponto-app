@@ -14,6 +14,12 @@ services:
         fromDatabase:
           name: ponto-db
           property: connectionString
+      # Assistente do gestor (perguntas por voz/texto). Preencha a chave no
+      # painel do Render; sem ela o app roda igual, só com o assistente desligado.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-4-5-20251001
 
 databases:
   - name: ponto-db

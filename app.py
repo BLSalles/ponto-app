@@ -87,6 +87,9 @@ def injetar_contexto_navegacao():
     contexto = {"marca": obter_marca()}
     if session.get("is_gestor"):
         contexto["ajustes_pendentes_nav"] = SolicitacaoAjuste.query.filter_by(status="pendente").count()
+        # Só mostra o item "Assistente" no menu se o módulo tiver sido registrado
+        # com sucesso (ver o final deste arquivo).
+        contexto["assistente_disponivel"] = "assistente.gestor_assistente" in app.view_functions
     return contexto
 
 
@@ -1911,6 +1914,28 @@ elif not PUSH_HABILITADO:
         "[push] VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — lembretes por "
         "notificação push desativados. Rode 'flask generate-vapid-keys' para gerar as chaves."
     )
+
+
+# ---------------------------------------------------------------------------
+# Assistente do gestor (perguntas por voz ou texto sobre os dados do ponto).
+#
+# Registrado aqui no fim de propósito: o módulo `assistente` recebe este próprio
+# módulo como contexto e reaproveita os modelos e as funções de cálculo definidos
+# acima — assim o número que o assistente responde é exatamente o mesmo que
+# aparece nas telas — sem criar import circular.
+#
+# Precisa da variável de ambiente ANTHROPIC_API_KEY. Sem ela o app continua
+# funcionando normalmente; só a página do assistente avisa que está desligada.
+# ---------------------------------------------------------------------------
+try:
+    import sys
+    from assistente import init_assistente
+
+    init_assistente(app, sys.modules[__name__])
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("[assistente] ANTHROPIC_API_KEY não configurada — assistente do gestor desativado.")
+except Exception as _ex_assistente:  # nunca derruba o app por causa do assistente
+    print(f"[assistente] não foi possível registrar o assistente: {_ex_assistente}")
 
 
 if __name__ == "__main__":
