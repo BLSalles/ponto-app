@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block titulo %}Assistente - {{ marca.nome_empresa }}{% endblock %}
+{% block conteudo %}
+
+<div class="card assistente-card">
+  <div class="card-header">
+    <h2>🤖 Assistente de Ponto</h2>
+    <span class="badge badge-ok">aprende com os dados da empresa</span>
+  </div>
+  <p class="ponto-instrucao" style="text-align:left; margin-top:0;">
+    {% if eh_gestor %}
+      Pergunte em português sobre horas extras, horas trabalhadas, atrasos, faltas, pendências
+      de aprovação ou presença. Cite o nome do colaborador e o período do jeito que preferir
+      (“mês passado”, “últimos 15 dias”, “de 01/07 a 15/07”).
+    {% else %}
+      Pergunte sobre o seu ponto: horas trabalhadas, horas extras, atrasos, dias incompletos e
+      o andamento das suas solicitações de ajuste.
+    {% endif %}
+  </p>
+
+  <div id="assistente-conversa" class="assistente-conversa" aria-live="polite"></div>
+
+  <div class="assistente-sugestoes" id="assistente-sugestoes">
+    {% for s in sugestoes %}
+      <button type="button" class="assistente-chip" data-pergunta="{{ s }}">{{ s }}</button>
+    {% endfor %}
+  </div>
+
+  <form id="assistente-form" class="assistente-form" autocomplete="off">
+    <input type="text" id="assistente-input" maxlength="500"
+           placeholder="{% if eh_gestor %}Ex: quantas horas extras o João tem este mês?{% else %}Ex: quantas horas extras eu tenho este mês?{% endif %}"
+           aria-label="Sua pergunta">
+    <button type="submit" class="btn-primario" id="assistente-enviar">Perguntar</button>
+  </form>
+</div>
+
+<script>
+(function () {
+  const conversa = document.getElementById('assistente-conversa');
+  const form = document.getElementById('assistente-form');
+  const input = document.getElementById('assistente-input');
+  const botaoEnviar = document.getElementById('assistente-enviar');
+
+  function escapar(texto) {
+    const div = document.createElement('div');
+    div.textContent = texto == null ? '' : String(texto);
+    return div.innerHTML;
+  }
+
+  // Formatação leve das respostas (negrito, itálico, listas) sem depender de
+  // biblioteca externa — e sempre a partir de texto já escapado.
+  function formatar(texto) {
+    let html = escapar(texto);
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/_(.+?)_/g, '<em>$1</em>');
+    const linhas = html.split('\n');
+    let saida = '';
+    let emLista = false;
+    linhas.forEach(function (linha) {
+      if (/^\s*-\s+/.test(linha)) {
+        if (!emLista) { saida += '<ul class="assistente-lista">'; emLista = true; }
+        saida += '<li>' + linha.replace(/^\s*-\s+/, '') + '</li>';
+      } else {
+        if (emLista) { saida += '</ul>'; emLista = false; }
+        saida += linha.trim() ? '<p>' + linha + '</p>' : '';
+      }
+    });
+    if (emLista) { saida += '</ul>'; }
+    return saida;
+  }
+
+  function adicionarBolha(classe, conteudoHtml) {
+    const bolha = document.createElement('div');
+    bolha.className = 'assistente-bolha ' + classe;
+    bolha.innerHTML = conteudoHtml;
+    conversa.appendChild(bolha);
+    conversa.scrollTop = conversa.scrollHeight;
+    return bolha;
+  }
+
+  function montarTabela(colunas, linhas, total) {
+    if (!linhas || !linhas.length) { return ''; }
+    let html = '<div class="tabela-wrap"><table class="assistente-tabela"><thead><tr>';
+    (colunas || []).forEach(function (c) { html += '<th>' + escapar(c) + '</th>'; });
+    html += '</tr></thead><tbody>';
+    linhas.forEach(function (linha) {
+      html += '<tr>';
+      linha.forEach(function (celula) { html += '<td>' + escapar(celula) + '</td>'; });
+      html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    if (total && total > linhas.length) {
+      // Mesma regra das telas: no máximo 10 linhas de uma vez.
+      html += '<p class="assistente-nota">Mostrando ' + linhas.length + ' de ' + total +
+              ' — refine o período para ver o restante.</p>';
+    }
+    return html;
+  }
+
+  function montarRodape(dados) {
+    let html = '';
+    if (dados.opcoes && dados.opcoes.length && dados.interacao_id) {
+      html += '<div class="assistente-opcoes">';
+      dados.opcoes.forEach(function (o) {
+        html += '<button type="button" class="assistente-chip assistente-opcao" data-colaborador="' +
+                o.id + '" data-interacao="' + dados.interacao_id + '">' + escapar(o.nome) + '</button>';
+      });
+      html += '</div>';
+    }
+    if (dados.sugestoes && dados.sugestoes.length) {
+      html += '<div class="assistente-opcoes">';
+      dados.sugestoes.forEach(function (s) {
+        html += '<button type="button" class="assistente-chip" data-pergunta="' + escapar(s) + '">' +
+                escapar(s) + '</button>';
+      });
+      html += '</div>';
+    }
+    if (dados.interacao_id) {
+      html += '<div class="assistente-feedback" data-interacao="' + dados.interacao_id + '">' +
+              '<span>Essa resposta ajudou?</span>' +
+              '<button type="button" class="assistente-voto" data-util="1" title="Sim">👍</button>' +
+              '<button type="button" class="assistente-voto" data-util="0" title="Não">👎</button>' +
+              '</div>';
+    }
+    return html;
+  }
+
+  function renderizarResposta(dados, bolhaExistente) {
+    let html = '';
+    if (dados.destaque) {
+      html += '<div class="assistente-destaque">' + escapar(dados.destaque) + '</div>';
+    }
+    html += formatar(dados.resposta || '');
+    html += montarTabela(dados.colunas, dados.detalhes, dados.detalhes_total);
+    if (dados.aprendido && dados.aprendido.length) {
+      html += '<p class="assistente-nota">✅ Aprendi: “' + escapar(dados.aprendido.join('”, “')) +
+              '” agora aponta para essa pessoa.</p>';
+    }
+    html += montarRodape(dados);
+    if (bolhaExistente) {
+      bolhaExistente.className = 'assistente-bolha assistente-bot';
+      bolhaExistente.innerHTML = html;
+      conversa.scrollTop = conversa.scrollHeight;
+    } else {
+      adicionarBolha('assistente-bot', html);
+    }
+  }
+
+  function enviarPergunta(pergunta) {
+    if (!pergunta || !pergunta.trim()) { return; }
+    adicionarBolha('assistente-usuario', '<p>' + escapar(pergunta) + '</p>');
+    input.value = '';
+    botaoEnviar.disabled = true;
+    const pensando = adicionarBolha('assistente-bot assistente-pensando',
+      '<p><span class="assistente-ponto"></span><span class="assistente-ponto"></span><span class="assistente-ponto"></span></p>');
+
+    fetch("{{ url_for('assistente_perguntar') }}", {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pergunta: pergunta })
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (dados) { renderizarResposta(dados, pensando); })
+      .catch(function () {
+        pensando.className = 'assistente-bolha assistente-bot';
+        pensando.innerHTML = '<p>Não consegui falar com o servidor agora. Tente de novo em instantes.</p>';
+      })
+      .finally(function () { botaoEnviar.disabled = false; input.focus(); });
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    enviarPergunta(input.value);
+  });
+
+  // Delegação: chips de sugestão, botões "era sobre quem?" e votos de feedback.
+  document.addEventListener('click', function (e) {
+    const chip = e.target.closest('.assistente-chip[data-pergunta]');
+    if (chip) {
+      enviarPergunta(chip.getAttribute('data-pergunta'));
+      return;
+    }
+
+    const opcao = e.target.closest('.assistente-opcao');
+    if (opcao) {
+      const bolha = opcao.closest('.assistente-bolha');
+      fetch("{{ url_for('assistente_ensinar') }}", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interacao_id: parseInt(opcao.getAttribute('data-interacao'), 10),
+          colaborador_id: parseInt(opcao.getAttribute('data-colaborador'), 10)
+        })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (dados) { renderizarResposta(dados, bolha); })
+        .catch(function () {});
+      return;
+    }
+
+    const voto = e.target.closest('.assistente-voto');
+    if (voto) {
+      const caixa = voto.closest('.assistente-feedback');
+      fetch("{{ url_for('assistente_feedback') }}", {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interacao_id: parseInt(caixa.getAttribute('data-interacao'), 10),
+          util: voto.getAttribute('data-util') === '1'
+        })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (dados) {
+          caixa.innerHTML = '<span class="assistente-nota">' +
+            escapar(dados.mensagem || 'Obrigado pelo retorno!') + '</span>';
+        })
+        .catch(function () {});
+    }
+  });
+
+  // Mensagem de abertura.
+  adicionarBolha('assistente-bot',
+    '<p>Olá, {{ session.get("nome", "") | e }}! Pergunte o que precisar sobre o ponto — ' +
+    'ou toque em uma das sugestões abaixo.</p>');
+  input.focus();
+})();
+</script>
+
+{% endblock %}

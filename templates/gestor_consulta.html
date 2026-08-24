@@ -40,12 +40,13 @@
   <p class="aviso-sucesso" style="color: var(--cor-texto-suave);">📅 Hoje é domingo — sem expectativa de comparecimento (atrasos e ausências não são contados aos domingos).</p>
 </div>
 {% elif colaboradores_sem_registro_hoje %}
-<div class="card card-aviso">
+<div class="card card-aviso" id="sem-ponto-hoje">
   <div class="card-header">
     <h2>⚠️ Ainda não bateram ponto hoje</h2>
+    <span class="badge badge-alerta">{{ colaboradores_sem_registro_hoje|length }}</span>
   </div>
   <div class="lista-colaboradores">
-    {% for c in colaboradores_sem_registro_hoje %}
+    {% for c in ausentes_paginados.items %}
       <div class="colaborador-item">
         <span class="colaborador-avatar">{{ c.nome[0]|upper }}</span>
         <div class="colaborador-info">
@@ -56,6 +57,7 @@
       </div>
     {% endfor %}
   </div>
+  {{ paginacao(ausentes_paginados) }}
 </div>
 {% else %}
 <div class="card card-sucesso">
@@ -63,7 +65,7 @@
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card" id="lista-colaboradores">
   <div class="card-header">
     <h2>Colaboradores</h2>
     {% if sem_cadastro_facial %}
@@ -71,7 +73,7 @@
     {% endif %}
   </div>
   <div class="lista-colaboradores">
-    {% for c in colaboradores %}
+    {% for c in colaboradores.items %}
       <div class="colaborador-item">
         <span class="colaborador-avatar">{{ c.nome[0]|upper }}</span>
         <div class="colaborador-info">
@@ -88,9 +90,10 @@
       <p class="vazio">Nenhum colaborador cadastrado ainda.</p>
     {% endfor %}
   </div>
+  {{ paginacao(colaboradores) }}
 </div>
 
-<div class="card">
+<div class="card" id="registros-ponto">
   <div class="card-header">
     <h2>Registros de Ponto</h2>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -141,7 +144,7 @@
       </tbody>
     </table>
   </div>
-  {{ paginacao(registros, 'gestor_consulta') }}
+  {{ paginacao(registros) }}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import paginacao %}
 {% block titulo %}Horas Extras - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
@@ -26,19 +27,19 @@
     <span class="stat-label">Total de horas extras — {{ nome_mes }}</span>
   </div>
   <div class="stat-card">
-    <span class="stat-valor">{{ resumo_colaboradores | selectattr('total_extra', 'gt', 0) | list | length }}</span>
+    <span class="stat-valor">{{ colaboradores_com_extra }}</span>
     <span class="stat-label">Colaboradores com hora extra</span>
   </div>
 </div>
 
-<div class="card">
+<div class="card" id="por-colaborador">
   <div class="card-header">
     <h2>Por colaborador</h2>
   </div>
 
-  {% if resumo_colaboradores %}
+  {% if resumo_colaboradores.total %}
     <div class="lista-horas-extras">
-      {% for r in resumo_colaboradores %}
+      {% for r in resumo_colaboradores.items %}
         <details class="extra-colaborador {% if r.total_extra == 0 %}extra-zerada{% endif %}">
           <summary>
             <span class="colaborador-avatar">{{ r.colaborador.nome[0]|upper }}</span>
@@ -52,16 +53,28 @@
           </summary>
 
           {% if r.dias_com_extra %}
-            <div class="extra-dias-lista">
+            {# Lista interna também respeita o limite de 10: os dias além disso
+               ficam escondidos atrás do botão "Mostrar mais" (paginação local,
+               sem recarregar a página e sem perder o mês filtrado). #}
+            <div class="extra-dias-lista" data-lista-limitada>
               {% for dia in r.dias_com_extra %}
-                <div class="extra-dia-item">
+                <div class="extra-dia-item" {% if loop.index > 10 %}data-oculto hidden{% endif %}>
                   <span>{{ dia.data.strftime('%d/%m/%Y (%A)') }}</span>
                   <span class="extra-dia-valores">
                     <span class="extra-dia-total">{{ dia.total_horas }} no dia</span>
-                    <span class="badge badge-alerta">+{{ dia.horas_extras | horas }}</span>
+                    {% if dia.excepcional and dia.status_excepcional != 'aprovado' %}
+                      <span class="badge badge-alerta">⚠️ aguardando revisão</span>
+                    {% else %}
+                      <span class="badge badge-alerta">+{{ dia.horas_extras | horas }}</span>
+                    {% endif %}
                   </span>
                 </div>
               {% endfor %}
+              {% if r.dias_com_extra | length > 10 %}
+                <button type="button" class="btn-secundario btn-mostrar-mais" data-restantes="{{ r.dias_com_extra | length - 10 }}">
+                  Mostrar mais {{ r.dias_com_extra | length - 10 }} dia(s)
+                </button>
+              {% endif %}
             </div>
           {% else %}
             <p class="vazio">Nenhuma hora extra neste mês.</p>
@@ -69,9 +82,29 @@
         </details>
       {% endfor %}
     </div>
+    {{ paginacao(resumo_colaboradores) }}
   {% else %}
     <p class="vazio">Nenhum colaborador cadastrado ainda.</p>
   {% endif %}
 </div>
+
+<script>
+  // "Mostrar mais" das listas internas de dias (10 por vez).
+  document.querySelectorAll('.btn-mostrar-mais').forEach(function (botao) {
+    botao.addEventListener('click', function () {
+      var lista = botao.closest('[data-lista-limitada]');
+      var ocultos = lista.querySelectorAll('[data-oculto][hidden]');
+      Array.prototype.slice.call(ocultos, 0, 10).forEach(function (item) {
+        item.removeAttribute('hidden');
+      });
+      var restantes = lista.querySelectorAll('[data-oculto][hidden]').length;
+      if (restantes === 0) {
+        botao.remove();
+      } else {
+        botao.textContent = 'Mostrar mais ' + Math.min(restantes, 10) + ' dia(s)';
+      }
+    });
+  });
+</script>
 
 {% endblock %}

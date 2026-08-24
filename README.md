@@ -40,71 +40,6 @@ O reconhecimento facial usa a biblioteca `face_recognition`, que depende do
 dependências de sistema. O build padrão do Render (buildpack Python) não
 inclui essas ferramentas, por isso o deploy é feito via Dockerfile.
 
-## Assistente do gestor (perguntas por voz ou texto)
-
-O painel do gestor tem uma aba **Assistente**, onde ele pergunta com as próprias
-palavras — falando ou digitando — coisas como:
-
-- "Quantas horas extras o Alex tem esse mês?"
-- "Quantos dias a Maria ficou sem bater ponto?"
-- "A que horas o João entrou ontem?"
-- "Quem chegou atrasado hoje?"
-- "Tem alguma coisa pendente pra eu aprovar?"
-
-### Como ligar
-
-1. Crie uma chave em <https://console.anthropic.com> (Settings → API Keys) e
-   coloque créditos na conta.
-2. Defina a variável de ambiente no servidor:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-export ANTHROPIC_MODEL="claude-haiku-4-5-20251001"   # opcional
-```
-
-   No Render: **Environment → Add Environment Variable** e reinicie o serviço.
-3. Instale a dependência nova (`pip install -r requirements.txt`) e pronto — o
-   item "Assistente" aparece sozinho no menu do gestor.
-
-Sem a chave o app funciona exatamente como antes; a página do assistente só
-avisa que está desligada.
-
-### Como funciona por dentro (`assistente.py`)
-
-A pergunta vai para a API da Anthropic junto com a descrição de **cinco
-ferramentas** de leitura: `listar_colaboradores`, `horas_extras`, `ausencias`,
-`registros_do_periodo` e `situacao_agora`. O modelo **não vê o banco e não
-escreve SQL** — ele só escolhe a ferramenta e os argumentos. Quem consulta é o
-próprio `assistente.py`, chamando as mesmas funções que já alimentam as telas
-(`_calcular_relatorio_horas_extras`, `montar_resumo_diario`,
-`calcular_horas_extras_dia`). Por isso o número que o assistente responde é, por
-construção, igual ao da tela de Horas Extras.
-
-A voz é do próprio navegador (Web Speech API): o áudio não passa pelo servidor,
-chega aqui já como texto, e a resposta pode ser lida em voz alta. Funciona no
-Chrome, Edge, Android e Safari recente; em navegador sem suporte, o microfone
-some e o campo de texto continua funcionando.
-
-Para conferir as ferramentas sem gastar chamada de API:
-
-```python
-from app import app
-with app.app_context():
-    exec_ = app.blueprints["assistente"].executores
-    print(exec_["horas_extras"]({"nome": "Alex"}))
-```
-
-### Cuidados
-
-- Só o gestor logado acessa (mesmo `gestor_required` do resto do painel).
-- A chave da API fica no servidor; o navegador nunca a recebe.
-- O assistente é **somente leitura** — não aprova ajuste nem altera registro.
-- "Faltas" aqui significa *dia útil sem nenhuma batida*: o sistema não tem
-  cadastro de férias, atestado nem feriado, e o assistente é instruído a
-  deixar essa ressalva clara sempre que responder sobre ausências.
-- Custo: com o modelo Haiku, cada pergunta sai por poucos centavos — a
-  resposta é curta e o histórico enviado fica limitado às últimas mensagens.
-
 ## Limitações desta versão simples (V1)
 
 - Banco de dados gratuito do Render tem limite de armazenamento e expira
@@ -112,7 +47,6 @@ with app.app_context():
   ou exportar os dados periodicamente (botão "Exportar CSV" no painel).
 - Fotos não são salvas em disco, apenas a "assinatura" facial (encoding)
   usada para conferência — ou seja, elas nunca são realmente armazenadas.
-- Sem paginação, sem separação por mês/dia. Simples de adicionar depois.
 - Reconhecimento facial local: qualquer foto suficientemente parecida com
   boa iluminação passa. Para maior rigor, ajuste `FACE_MATCH_TOLERANCE`
   em `app.py` (quanto menor, mais rígido).
@@ -125,3 +59,71 @@ with app.app_context():
 - Adicionar filtro por período e por colaborador no painel
 - Notificação por e-mail/WhatsApp em caso de ponto fora do horário
 - Múltiplos gestores e histórico de aprovação/contestação
+
+
+## Paginação (10 registros por página)
+
+Toda lista ou tabela do sistema mostra no máximo **10 registros por página** e
+pagina o restante. Isso vale para: registros de ponto (gestor e colaborador),
+resumo por dia, solicitações de ajuste (pendentes e histórico), jornadas
+excepcionais, colaboradores (dashboard e cadastro) e o relatório de horas
+extras. No chat do assistente, as tabelas de detalhe seguem a mesma regra.
+
+Como foi feito:
+
+- `ITENS_POR_PAGINA`, `paginar_query()` e `paginar_lista()` em `app.py` são o
+  único ponto de verdade — antes cada rota tinha seu próprio limite (20, 25, 30)
+  e algumas listas nem paginavam (usavam `.limit()` fixo e escondiam o resto).
+- Cada bloco paginado tem seu **próprio parâmetro na URL** (`p_registros`,
+  `p_resumo`, `p_pendentes`, `p_historico`, `p_colaboradores`...), então duas
+  tabelas na mesma tela não andam mais juntas.
+- Os links de paginação **preservam os outros parâmetros** da URL (ex.:
+  `?mes=2026-08` na tela de horas extras) e levam de volta à altura da tabela.
+- Página inválida (`?p_registros=abc`, `-5`, `99999`) não quebra mais nem
+  devolve tabela vazia: cai na primeira/última página com conteúdo.
+- Corrigido também o `contar_registros_hoje`, que olhava só as 10 últimas
+  batidas do colaborador e errava o total de quem bate mais de 10 pontos no dia.
+
+## Assistente inteligente (`/assistente`)
+
+Chat em português que responde sobre os dados do ponto — **sem API externa,
+sem chave paga e sem custo por pergunta**. O motor está em `assistente.py` e usa
+exatamente as mesmas funções de cálculo das telas (`montar_resumo_diario`,
+`calcular_horas_extras_dia`), então nunca responde um número diferente do que o
+relatório mostra.
+
+Exemplos de perguntas:
+
+- "Quantas horas extras o colaborador João tem?"
+- "Quantas horas a Maria trabalhou mês passado?"
+- "Quem tem mais horas extras este mês?"
+- "Quantos atrasos o Carlos teve nos últimos 30 dias?"
+- "Quem ainda não bateu ponto hoje?"
+- "Quais pendências estão esperando minha aprovação?"
+- "Quantas horas extras de 01/07 a 15/07 a Helena tem?"
+
+Entende nome escrito errado ou abreviado, e períodos em linguagem natural
+("hoje", "ontem", "esta semana", "mês passado", "em julho", "nos últimos 15
+dias", "de 01/07 a 15/07", "2026-07").
+
+**Como ele aprende com o processo**
+
+- Cada pergunta e resposta vira uma linha em `assistente_interacao`.
+- 👍/👎 em uma resposta ajusta o peso daquele jeito de perguntar
+  (`assistente_padrao`): perguntas futuras parecidas passam a cair na intenção
+  certa mesmo sem bater nas regras fixas.
+- Quando o assistente não reconhece o nome, ele pergunta de quem se trata; ao
+  escolher a pessoa, o apelido usado é aprendido (`assistente_apelido`) e passa
+  a funcionar sozinho ("jô" → Joana Ribeiro).
+- As perguntas mais bem avaliadas viram as sugestões da tela inicial do chat.
+- As respostas comparam o período pedido com a média dos meses anteriores do
+  próprio colaborador, então a leitura fica mais rica conforme a base cresce.
+
+**Permissões**
+
+- Gestor: pergunta sobre qualquer colaborador e sobre a equipe.
+- Colaborador: só os próprios dados. Perguntar sobre outra pessoa ou sobre a
+  equipe recebe uma recusa educada, sem vazar número nenhum.
+
+As três tabelas novas são criadas automaticamente no start (`db.create_all()`),
+sem migração manual.

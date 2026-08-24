@@ -1,662 +1,1172 @@
 """
-Assistente do Gestor — perguntas em linguagem natural (voz ou texto) sobre os
-dados do ponto.
+Assistente inteligente do controle de ponto.
 
-Como funciona
--------------
-O gestor pergunta "quantas horas extras o Alex tem esse mês?". A pergunta vai
-para a API da Anthropic (Messages API) junto com a descrição de um conjunto
-pequeno e fechado de FERRAMENTAS. O modelo não vê o banco e não escreve SQL:
-ele apenas escolhe qual ferramenta chamar e com quais argumentos. Quem executa
-a consulta é este arquivo, reaproveitando exatamente as mesmas funções que já
-alimentam as telas do painel (`_calcular_relatorio_horas_extras`,
-`montar_resumo_diario`, `calcular_horas_extras_dia`, ...). Assim o número que o
-assistente fala é, por construção, o mesmo número que aparece na tela.
+O que é
+-------
+Um motor de perguntas e respostas em linguagem natural (português) que responde
+o gestor (e, de forma restrita, o próprio colaborador) usando SÓ os dados reais
+do processo de ponto: batidas, jornadas, ajustes, aprovações e configuração da
+empresa. Não depende de nenhuma API externa, chave paga ou internet — roda
+dentro do próprio Flask.
 
-Segurança
----------
-- Só o gestor logado acessa (decorador `gestor_required` do app).
-- A chave da API fica no servidor (variável de ambiente ANTHROPIC_API_KEY).
-  Nunca é enviada ao navegador.
-- O modelo só consegue ler o que as ferramentas abaixo devolvem. Não há acesso
-  livre ao banco, nem escrita: o assistente é somente leitura.
+Como ele "entende" a pergunta
+-----------------------------
+1. Normaliza o texto (minúsculas, sem acentos, sem pontuação).
+2. Descobre DE QUEM se fala: casa o texto com os nomes cadastrados usando
+   tokens + similaridade aproximada (difflib), então "quantas hrs extras o
+   joao tem" acha "João Pedro da Silva" mesmo escrito errado.
+3. Descobre QUANDO: "hoje", "ontem", "essa semana", "mês passado", "em julho",
+   "nos últimos 15 dias", "de 01/07 a 15/07", "2026-07"...
+4. Descobre O QUE se pergunta (intenção): horas extras, horas trabalhadas,
+   atrasos, faltas, pendências, quem está presente, ranking, último ponto etc.
+5. Executa a consulta correspondente e escreve a resposta com os números reais.
 
-Configuração (variáveis de ambiente)
-------------------------------------
-ANTHROPIC_API_KEY   obrigatória para ligar o assistente (sem ela o app roda
-                    normalmente, só com o assistente desativado).
-ANTHROPIC_MODEL     opcional. Padrão: claude-haiku-4-5-20251001 (mais barato e
-                    rápido; dá conta bem desse tipo de pergunta). Para respostas
-                    mais elaboradas: claude-sonnet-5.
+Como ele APRENDE com o processo
+-------------------------------
+- Toda pergunta/resposta vira uma interação salva no banco.
+- Quando o gestor marca uma resposta como útil (👍), o padrão da pergunta é
+  guardado com peso positivo; quando marca como não útil (👎), o peso cai.
+  Perguntas futuras que não batem com nenhuma regra fixa são resolvidas por
+  similaridade com esses padrões já aprendidos.
+- Apelidos aprendem sozinhos: se o gestor pergunta por "Jô" e depois confirma
+  que era a "Joana Ribeiro", "jo" passa a apontar para ela.
+- As respostas usam a base histórica como referência (média da equipe, média do
+  próprio colaborador nos meses anteriores), então a leitura melhora conforme a
+  empresa acumula dados.
+
+Este módulo não importa nada do app.py — recebe os modelos e funções de que
+precisa em um "contexto" (injeção de dependência). Isso evita import circular e
+deixa o motor testável isoladamente.
 """
 
-import os
-import json
+import re
 import unicodedata
-from datetime import datetime, timedelta, date
+from datetime import datetime, date, timedelta
+from difflib import SequenceMatcher
 
-from flask import Blueprint, render_template, request, jsonify, session
+# ---------------------------------------------------------------------------
+# Utilidades de texto
+# ---------------------------------------------------------------------------
+MESES = {
+    "janeiro": 1, "jan": 1, "fevereiro": 2, "fev": 2, "marco": 3, "mar": 3,
+    "abril": 4, "abr": 4, "maio": 5, "mai": 5, "junho": 6, "jun": 6,
+    "julho": 7, "jul": 7, "agosto": 8, "ago": 8, "setembro": 9, "set": 9,
+    "outubro": 10, "out": 10, "novembro": 11, "nov": 11, "dezembro": 12, "dez": 12,
+}
 
-# Modelo padrão: o mais barato da família. Trocável por variável de ambiente.
-MODELO_PADRAO = "claude-haiku-4-5-20251001"
+MESES_NOME = [
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+]
 
-MAX_ITERACOES_FERRAMENTA = 8   # trava de segurança contra loop infinito de tool use
-MAX_CARACTERES_PERGUNTA = 500
-MAX_MENSAGENS_HISTORICO = 8    # mantém o contexto curto (e a conta baixa)
+DIAS_SEMANA = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+               "sexta-feira", "sábado", "domingo"]
+
+# Palavras que nunca ajudam a identificar uma pessoa (evita que "quantas horas
+# extras a ana tem" case o "a" com alguém chamado "A. Silva").
+PALAVRAS_IGNORADAS = {
+    "quantas", "quanto", "quantos", "horas", "hora", "extra", "extras", "hrs", "hr", "h",
+    "o", "a", "os", "as", "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas",
+    "colaborador", "colaboradora", "funcionario", "funcionaria", "empregado", "pessoa",
+    "tem", "teve", "fez", "fizeram", "esta", "estao", "e", "eh", "foi", "ficou",
+    "qual", "quais", "quem", "quando", "onde", "porque", "por", "que", "com", "sem",
+    "me", "mostra", "mostre", "diga", "fala", "falar", "quero", "saber", "ver",
+    "hoje", "ontem", "mes", "mês", "semana", "ano", "dia", "dias", "periodo", "ultimo",
+    "ultima", "ultimos", "ultimas", "passado", "passada", "esse", "essa", "este", "esta",
+    "atual", "total", "trabalhou", "trabalhadas", "trabalhou", "banco", "saldo",
+    "atrasos", "atraso", "faltas", "falta", "ponto", "pontos", "registro", "registros",
+    "por", "favor", "pra", "para", "meu", "minha", "meus", "minhas", "eu",
+    "equipe", "time", "empresa", "todos", "todas", "geral", "pessoal", "galera",
+    "funcionarios", "colaboradores", "ninguem", "alguem", "cada", "algum", "alguma",
+    "nao", "sim", "ainda", "ja", "acumulou", "acumuladas", "tenho", "tive", "fiz",
+}
 
 
-def _normalizar(texto):
-    """'Aléx  Silva ' -> 'alex silva' (sem acento, minúsculo, sem espaço sobrando).
-
-    Serve para casar o nome falado pelo gestor com o nome cadastrado mesmo com
-    acento faltando, letra trocada ou transcrição imperfeita da voz.
-    """
+def normalizar(texto):
+    """Minúsculas, sem acentos, sem pontuação — base de toda a comparação."""
     if not texto:
         return ""
-    sem_acento = unicodedata.normalize("NFKD", str(texto))
-    sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
-    return " ".join(sem_acento.lower().split())
+    texto = unicodedata.normalize("NFKD", str(texto))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.lower()
+    texto = re.sub(r"[^a-z0-9\s:/\-]", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
 
 
-def init_assistente(app, ctx):
-    """Registra as rotas do assistente.
+def tokens_uteis(texto_normalizado):
+    return [t for t in texto_normalizado.split() if len(t) > 1 and t not in PALAVRAS_IGNORADAS]
 
-    `ctx` é o próprio módulo app.py — passamos ele inteiro para reaproveitar
-    modelos e funções de cálculo sem criar import circular.
-    """
 
-    bp = Blueprint("assistente", __name__)
+def similaridade(a, b):
+    return SequenceMatcher(None, a, b).ratio()
 
-    # ------------------------------------------------------------------
-    # Acesso aos dados — cada função abaixo vira uma "ferramenta" do modelo
-    # ------------------------------------------------------------------
 
-    def _mes_referencia(mes_texto):
-        """'2026-08' -> (2026, 8). Vazio/inválido -> mês atual em Brasília."""
-        try:
-            ano, mes = (int(p) for p in str(mes_texto).split("-")[:2])
-            if 1 <= mes <= 12 and 2000 <= ano <= 2100:
-                return ano, mes
-        except Exception:
-            pass
-        hoje = ctx.agora_brasilia().date()
-        return hoje.year, hoje.month
+def formatar_data(d):
+    return d.strftime("%d/%m/%Y")
 
-    def _data_iso(texto, padrao=None):
-        try:
-            return date.fromisoformat(str(texto)[:10])
-        except Exception:
-            return padrao
 
-    DIAS_SEMANA_PT = [
-        "segunda-feira", "terça-feira", "quarta-feira",
-        "quinta-feira", "sexta-feira", "sábado", "domingo",
-    ]
+def nome_mes(d):
+    return f"{MESES_NOME[d.month - 1]} de {d.year}"
 
-    def _dia_semana(d):
-        return DIAS_SEMANA_PT[d.weekday()]
 
-    def _colaboradores_ativos():
-        return (
-            ctx.Colaborador.query
-            .filter_by(is_gestor=False)
-            .order_by(ctx.Colaborador.nome)
-            .all()
-        )
+# ---------------------------------------------------------------------------
+# Período
+# ---------------------------------------------------------------------------
+class Periodo:
+    def __init__(self, inicio, fim, rotulo, explicito=True):
+        self.inicio = inicio
+        self.fim = fim
+        self.rotulo = rotulo
+        self.explicito = explicito  # False = período assumido por padrão
 
-    def _resolver_colaborador(nome_procurado):
-        """Encontra o colaborador pelo nome falado/digitado.
+    def contem(self, d):
+        return self.inicio <= d <= self.fim
 
-        Devolve (colaborador, erro). Tenta, em ordem: nome exato, primeiro nome,
-        nome contido, e por último semelhança (tolera 'Alexx' -> 'Alex').
-        """
-        alvo = _normalizar(nome_procurado)
-        if not alvo:
-            return None, "Nenhum nome foi informado."
+    @property
+    def frase(self):
+        """Rótulo pronto para entrar no meio de uma frase, com a preposição certa
+        ("em agosto de 2026", "nos últimos 30 dias", "hoje", "na semana passada")."""
+        r = self.rotulo
+        if r in ("hoje", "ontem", "anteontem"):
+            return r
+        if r.startswith("últimos") or r.startswith("últimas"):
+            return f"nos {r}"
+        if r in ("esta semana",):
+            return "nesta semana"
+        if r == "semana passada":
+            return "na semana passada"
+        if r == "todo o período":
+            return "em todo o período"
+        return f"em {r}"
 
-        colaboradores = _colaboradores_ativos()
-        if not colaboradores:
-            return None, "Não há colaboradores cadastrados."
+    def __repr__(self):
+        return f"<Periodo {self.inicio}..{self.fim} ({self.rotulo})>"
 
-        pares = [(c, _normalizar(c.nome)) for c in colaboradores]
 
-        exatos = [c for c, n in pares if n == alvo]
-        if len(exatos) == 1:
-            return exatos[0], None
+def _primeiro_dia_mes(d):
+    return d.replace(day=1)
 
-        primeiro_nome = [c for c, n in pares if n.split()[0] == alvo.split()[0]]
-        if len(primeiro_nome) == 1:
-            return primeiro_nome[0], None
 
-        contidos = [c for c, n in pares if alvo in n or n in alvo]
-        if len(contidos) == 1:
-            return contidos[0], None
+def _ultimo_dia_mes(d):
+    proximo = date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+    return proximo - timedelta(days=1)
 
-        candidatos = exatos or primeiro_nome or contidos
-        if len(candidatos) > 1:
-            nomes = ", ".join(c.nome for c in candidatos)
-            return None, f"Mais de um colaborador combina com '{nome_procurado}': {nomes}. Pergunte ao gestor qual deles."
 
-        # Última tentativa: semelhança de texto (erro de digitação/transcrição)
-        import difflib
-        nomes_normalizados = [n for _, n in pares]
-        parecidos = difflib.get_close_matches(alvo, nomes_normalizados, n=2, cutoff=0.6)
-        if not parecidos:
-            # tenta só pelo primeiro nome de cada um
-            primeiros = [n.split()[0] for n in nomes_normalizados]
-            parecidos_primeiro = difflib.get_close_matches(alvo.split()[0], primeiros, n=2, cutoff=0.6)
-            if len(parecidos_primeiro) == 1:
-                idx = primeiros.index(parecidos_primeiro[0])
-                return pares[idx][0], None
-        if len(parecidos) == 1:
-            idx = nomes_normalizados.index(parecidos[0])
-            return pares[idx][0], None
+def detectar_periodo(texto, hoje):
+    """Extrai o intervalo de datas citado na pergunta. Se nada for citado,
+    assume o mês corrente (marcado como não-explícito, para a resposta poder
+    avisar qual período foi considerado)."""
+    t = normalizar(texto)
 
-        disponiveis = ", ".join(c.nome for c in colaboradores)
-        return None, (
-            f"Não encontrei ninguém chamado '{nome_procurado}'. "
-            f"Colaboradores cadastrados: {disponiveis}."
-        )
+    # Intervalo explícito: "de 01/07 a 15/07", "entre 01/07/2026 e 20/07/2026"
+    m = re.search(r"(?:de|entre)\s+(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\s+(?:a|ate|e)\s+(\d{1,2}/\d{1,2}(?:/\d{2,4})?)", t)
+    if m:
+        d1 = _parse_data_br(m.group(1), hoje)
+        d2 = _parse_data_br(m.group(2), hoje)
+        if d1 and d2:
+            if d1 > d2:
+                d1, d2 = d2, d1
+            return Periodo(d1, d2, f"{formatar_data(d1)} a {formatar_data(d2)}")
 
-    def _registros_no_periodo(colaborador_id, dia_inicial, dia_final):
-        """Batidas do colaborador entre dois dias (inclusive), no fuso de Brasília.
+    # Data única: "no dia 12/07", "em 12/07/2026"
+    m = re.search(r"\b(\d{1,2}/\d{1,2}(?:/\d{2,4})?)\b", t)
+    if m:
+        d = _parse_data_br(m.group(1), hoje)
+        if d:
+            return Periodo(d, d, formatar_data(d))
 
-        A janela em UTC é folgada de propósito (±6h) e o dia exato é filtrado
-        depois em Brasília — mesma estratégia usada no restante do app.
-        """
-        inicio_utc = datetime.combine(dia_inicial, datetime.min.time()) - timedelta(hours=6)
-        fim_utc = datetime.combine(dia_final + timedelta(days=1), datetime.min.time()) + timedelta(hours=6)
-        candidatos = (
-            ctx.RegistroPonto.query
-            .filter(
-                ctx.RegistroPonto.colaborador_id == colaborador_id,
-                ctx.RegistroPonto.data_hora >= inicio_utc,
-                ctx.RegistroPonto.data_hora < fim_utc,
-            )
-            .order_by(ctx.RegistroPonto.data_hora.asc())
-            .all()
-        )
-        return [r for r in candidatos if dia_inicial <= ctx.para_brasilia(r.data_hora).date() <= dia_final]
+    # AAAA-MM (formato do filtro de mês da tela de horas extras)
+    m = re.search(r"\b(20\d{2})-(\d{1,2})\b", t)
+    if m:
+        ano, mes = int(m.group(1)), int(m.group(2))
+        if 1 <= mes <= 12:
+            inicio = date(ano, mes, 1)
+            return Periodo(inicio, _ultimo_dia_mes(inicio), nome_mes(inicio))
 
-    # --- ferramenta: listar_colaboradores ------------------------------
+    if re.search(r"\bhoje\b", t):
+        return Periodo(hoje, hoje, "hoje")
+    if re.search(r"\bontem\b", t):
+        ontem = hoje - timedelta(days=1)
+        return Periodo(ontem, ontem, "ontem")
+    if re.search(r"\banteontem\b", t):
+        d = hoje - timedelta(days=2)
+        return Periodo(d, d, "anteontem")
 
-    def ferramenta_listar_colaboradores(_args):
-        colaboradores = _colaboradores_ativos()
-        return {
-            "total": len(colaboradores),
-            "colaboradores": [
-                {
-                    "nome": c.nome,
-                    "email": c.email,
-                    "ativo": bool(c.ativo),
-                    "cadastro_facial": bool(c.face_encoding),
-                }
-                for c in colaboradores
-            ],
-        }
+    m = re.search(r"ultim[oa]s?\s+(\d{1,3})\s+dias?", t)
+    if m:
+        dias = max(1, min(365, int(m.group(1))))
+        return Periodo(hoje - timedelta(days=dias - 1), hoje, f"últimos {dias} dias")
 
-    # --- ferramenta: horas_extras --------------------------------------
+    m = re.search(r"ultim[oa]s?\s+(\d{1,2})\s+(?:meses|mes)", t)
+    if m:
+        meses = max(1, min(24, int(m.group(1))))
+        inicio = _primeiro_dia_mes(hoje)
+        for _ in range(meses - 1):
+            inicio = _primeiro_dia_mes(inicio - timedelta(days=1))
+        return Periodo(inicio, hoje, f"últimos {meses} meses")
 
-    def ferramenta_horas_extras(args):
-        ano, mes = _mes_referencia(args.get("mes"))
-        resumo, primeiro_dia, config = ctx._calcular_relatorio_horas_extras(ano, mes)
+    if re.search(r"semana passada|semana anterior", t):
+        inicio_semana_atual = hoje - timedelta(days=hoje.weekday())
+        inicio = inicio_semana_atual - timedelta(days=7)
+        return Periodo(inicio, inicio + timedelta(days=6), "semana passada")
 
-        nome = (args.get("nome") or "").strip()
-        if nome:
-            colaborador, erro = _resolver_colaborador(nome)
-            if erro:
-                return {"erro": erro}
-            resumo = [r for r in resumo if r["colaborador"].id == colaborador.id]
-            if not resumo:
-                return {
-                    "mes": f"{ano:04d}-{mes:02d}",
-                    "colaborador": colaborador.nome,
-                    "horas_extras_decimal": 0.0,
-                    "horas_extras": "0min",
-                    "observacao": "Nenhum registro de ponto para esse colaborador no mês.",
-                }
+    if re.search(r"(esta|essa|este|esse|nesta|nessa)\s+semana|semana atual|na semana", t):
+        inicio = hoje - timedelta(days=hoje.weekday())
+        return Periodo(inicio, hoje, "esta semana")
 
-        def formatar(r):
-            return {
-                "colaborador": r["colaborador"].nome,
-                "horas_extras_decimal": r["total_extra"],
-                "horas_extras": ctx.formatar_horas(r["total_extra"]),
-                "horas_trabalhadas_no_mes": ctx.formatar_horas(r["total_horas_mes"]),
-                "dias_com_extra": [
-                    {
-                        "data": d["data"].isoformat(),
-                        "dia_semana": _dia_semana(d["data"]),
-                        "horas_no_dia": d["total_horas"],
-                        "horas_extras": ctx.formatar_horas(d["horas_extras"]),
-                        "dia_incompleto": d["incompleto"],
-                        "jornada_excepcional": d.get("excepcional", False),
-                        "status_aprovacao": d.get("status_excepcional"),
-                    }
-                    for d in r["dias_com_extra"][:31]
-                ],
-            }
+    if re.search(r"mes passado|mes anterior", t):
+        ultimo_dia_anterior = _primeiro_dia_mes(hoje) - timedelta(days=1)
+        return Periodo(_primeiro_dia_mes(ultimo_dia_anterior), ultimo_dia_anterior,
+                       nome_mes(ultimo_dia_anterior))
 
-        return {
-            "mes": f"{ano:04d}-{mes:02d}",
-            "jornada_padrao": f"{config.horario_entrada} às {config.horario_saida}",
-            "regra": (
-                "Hora extra = horas trabalhadas no dia menos a duração da jornada padrão. "
-                "Domingo trabalhado conta integralmente como hora extra. "
-                "Jornada contínua acima de 14h fica retida (não soma) até o gestor aprovar."
-            ),
-            "resultado": [formatar(r) for r in resumo],
-        }
+    if re.search(r"ano passado", t):
+        return Periodo(date(hoje.year - 1, 1, 1), date(hoje.year - 1, 12, 31), f"{hoje.year - 1}")
 
-    # --- ferramenta: ausencias -----------------------------------------
+    if re.search(r"(neste|nesse|este|esse)\s+ano|ano atual|no ano", t):
+        return Periodo(date(hoje.year, 1, 1), hoje, f"{hoje.year}")
 
-    def ferramenta_ausencias(args):
-        ano, mes = _mes_referencia(args.get("mes"))
-        hoje = ctx.agora_brasilia().date()
-        primeiro_dia = date(ano, mes, 1)
-        ultimo_dia = (date(ano + 1, 1, 1) if mes == 12 else date(ano, mes + 1, 1)) - timedelta(days=1)
-        if ultimo_dia > hoje:
-            ultimo_dia = hoje  # não conta falta em dia que ainda não aconteceu
-        if primeiro_dia > hoje:
-            return {"erro": "Esse mês ainda não começou."}
+    # Nome de mês ("em julho", "julho de 2025")
+    for nome, numero in MESES.items():
+        if re.search(rf"\b{nome}\b", t):
+            m_ano = re.search(rf"\b{nome}\b\s*(?:de\s*)?(20\d{{2}})", t)
+            ano = int(m_ano.group(1)) if m_ano else hoje.year
+            inicio = date(ano, numero, 1)
+            if not m_ano and inicio > hoje:  # "em dezembro" no meio do ano = dezembro passado
+                inicio = date(ano - 1, numero, 1)
+            fim = min(_ultimo_dia_mes(inicio), hoje) if inicio.year == hoje.year and inicio.month == hoje.month else _ultimo_dia_mes(inicio)
+            return Periodo(inicio, fim, nome_mes(inicio))
 
-        contar_sabado = bool(args.get("contar_sabado", True))
+    if re.search(r"(este|esse|neste|nesse)\s+mes|mes atual|no mes", t):
+        return Periodo(_primeiro_dia_mes(hoje), hoje, nome_mes(hoje))
 
-        nome = (args.get("nome") or "").strip()
-        if nome:
-            colaborador, erro = _resolver_colaborador(nome)
-            if erro:
-                return {"erro": erro}
-            colaboradores = [colaborador]
+    if re.search(r"sempre|desde o inicio|historico completo|todo o periodo|total geral", t):
+        return Periodo(date(2000, 1, 1), hoje, "todo o período")
+
+    # Padrão: mês corrente.
+    return Periodo(_primeiro_dia_mes(hoje), hoje, nome_mes(hoje), explicito=False)
+
+
+def _parse_data_br(texto, hoje):
+    partes = texto.split("/")
+    try:
+        dia = int(partes[0])
+        mes = int(partes[1])
+        if len(partes) > 2:
+            ano = int(partes[2])
+            if ano < 100:
+                ano += 2000
         else:
-            colaboradores = _colaboradores_ativos()
+            ano = hoje.year
+        return date(ano, mes, dia)
+    except (ValueError, IndexError):
+        return None
 
-        dias_uteis = []
-        dia = primeiro_dia
-        while dia <= ultimo_dia:
-            if not ctx.eh_domingo(dia) and (contar_sabado or dia.weekday() != 5):
-                dias_uteis.append(dia)
-            dia += timedelta(days=1)
 
-        resultado = []
-        for c in colaboradores:
-            registros = _registros_no_periodo(c.id, primeiro_dia, ultimo_dia)
-            dias_com_batida = {ctx.para_brasilia(r.data_hora).date() for r in registros}
-            ausentes = [d for d in dias_uteis if d not in dias_com_batida]
-            resultado.append({
-                "colaborador": c.nome,
-                "dias_sem_nenhuma_batida": len(ausentes),
-                "datas": [d.isoformat() for d in ausentes],
-                "dias_uteis_considerados": len(dias_uteis),
-            })
+# ---------------------------------------------------------------------------
+# Intenções
+# ---------------------------------------------------------------------------
+# Cada intenção tem frases-chave; quanto mais longa a frase que casar, mais forte
+# o sinal (evita que "hora" solto vença "hora extra").
+INTENCOES = {
+    "horas_extras": [
+        "horas extras", "hora extra", "horas extra", "hrs extras", "hr extra",
+        "extras", "banco de horas", "saldo de horas", "he acumulada", "sobrejornada",
+    ],
+    "horas_trabalhadas": [
+        "horas trabalhadas", "quantas horas trabalhou", "carga horaria", "total de horas",
+        "horas no mes", "tempo trabalhado", "quantas horas fez", "jornada cumprida",
+    ],
+    "atrasos": [
+        "atrasos", "atraso", "atrasou", "chegou tarde", "chegou atrasado", "quem se atrasa",
+        "pontualidade",
+    ],
+    "faltas": [
+        "faltas", "faltou", "ausencias", "ausencia", "ausente", "nao bateu ponto",
+        "nao veio", "nao compareceu", "dias sem registro",
+    ],
+    "presentes_hoje": [
+        "quem esta presente", "quem bateu ponto hoje", "presentes hoje", "quem trabalhou hoje",
+        "quem ja bateu", "presenca hoje", "quem esta trabalhando",
+    ],
+    "ultimo_ponto": [
+        "ultimo ponto", "ultima batida", "ultimo registro", "que horas chegou",
+        "que horas saiu", "quando bateu", "horario de entrada de", "ja bateu ponto",
+    ],
+    "pendencias": [
+        "pendencias", "pendencia", "solicitacoes", "solicitacao de ajuste", "ajustes pendentes",
+        "aguardando aprovacao", "para aprovar", "jornada excepcional", "aprovacoes",
+    ],
+    "ranking": [
+        "quem tem mais", "ranking", "top", "maior numero", "quem fez mais",
+        "quem mais fez", "lista de horas extras", "todos os colaboradores",
+        "resumo da equipe", "por colaborador",
+    ],
+    "registros_incompletos": [
+        "incompleto", "incompletos", "esqueceu de bater", "sem saida", "sem entrada",
+        "ponto aberto", "faltando batida",
+    ],
+    "resumo_dia": [
+        "espelho de ponto", "resumo do dia", "batidas do dia", "registros do dia",
+        "como foi o dia", "detalhe do dia", "marcacoes do dia",
+    ],
+    "configuracao": [
+        "jornada padrao", "horario padrao", "configuracao", "qual o horario de entrada da empresa",
+        "quantas horas por dia", "meta de horas",
+    ],
+    "custo_extras": [
+        "custo", "quanto vou pagar", "valor das horas extras", "impacto na folha",
+    ],
+    "ajuda": [
+        "o que voce faz", "o que voce sabe", "como usar", "ajuda", "me ajuda",
+        "quais perguntas", "exemplos de pergunta", "voce consegue",
+    ],
+}
 
-        return {
-            "mes": f"{ano:04d}-{mes:02d}",
-            "periodo_apurado": f"{primeiro_dia.isoformat()} a {ultimo_dia.isoformat()}",
-            "criterio": (
-                "IMPORTANTE: o sistema não tem cadastro de faltas, férias, atestado ou feriado. "
-                "O que está abaixo é 'dia útil sem nenhuma batida de ponto' — domingos ficam de fora, "
-                f"{'sábados contam como dia útil' if contar_sabado else 'sábados foram excluídos'}, e feriados "
-                "aparecem como ausência. Trate como indício a conferir, não como falta confirmada."
-            ),
-            "resultado": resultado,
-        }
 
-    # --- ferramenta: registros_do_periodo ------------------------------
+PALAVRAS_DE_INTENCAO = {
+    palavra
+    for frases in INTENCOES.values()
+    for frase in frases
+    for palavra in frase.split()
+}
 
-    def ferramenta_registros(args):
-        nome = (args.get("nome") or "").strip()
-        colaborador, erro = _resolver_colaborador(nome)
-        if erro:
-            return {"erro": erro}
 
-        hoje = ctx.agora_brasilia().date()
-        dia_final = _data_iso(args.get("data_fim"), hoje)
-        dia_inicial = _data_iso(args.get("data_inicio"), dia_final - timedelta(days=7))
-        if dia_inicial > dia_final:
-            dia_inicial, dia_final = dia_final, dia_inicial
-        if (dia_final - dia_inicial).days > 92:
-            dia_inicial = dia_final - timedelta(days=92)  # evita resposta gigante
+def termos_para_apelido(pergunta, nome_colaborador):
+    """Quando o gestor corrige o assistente dizendo de quem era a pergunta, estes
+    são os termos que passam a apontar para essa pessoa. Filtra tudo que é
+    vocabulário do sistema (palavras de período, de intenção, números) para não
+    aprender lixo como "extras" = Fulano."""
+    nome_tokens = set(normalizar(nome_colaborador).split())
+    termos = []
+    for token in tokens_uteis(normalizar(pergunta)):
+        if token in nome_tokens or token in PALAVRAS_DE_INTENCAO or token in MESES:
+            continue
+        if token.isdigit() or "/" in token or "-" in token or ":" in token:
+            continue
+        if len(token) < 2 or len(token) > 30:
+            continue
+        termos.append(token)
+    return termos[:3]
 
-        config = ctx.obter_configuracao()
-        registros = _registros_no_periodo(colaborador.id, dia_inicial, dia_final)
-        dias = ctx.montar_resumo_diario(registros)
 
-        detalhes = []
-        for d in dias:
-            extra = ctx.calcular_horas_extras_dia(
-                d["total_horas_decimal"], config.horario_entrada, config.horario_saida,
-                eh_domingo_flag=ctx.eh_domingo(d["data"]),
-            )
-            d["horas_extras"] = extra
-            ctx.aplicar_status_excepcional(d, colaborador.id)
-            batidas = [b.strftime("%H:%M") for b in d["batidas"]]
-            primeira = batidas[0] if batidas else None
-            detalhes.append({
-                "data": d["data"].isoformat(),
-                "dia_semana": _dia_semana(d["data"]),
-                "batidas": batidas,
-                "primeira_batida": primeira,
-                "atrasado": bool(primeira and not ctx.eh_domingo(d["data"]) and primeira > config.horario_entrada),
-                "horas_trabalhadas": d["total_horas"],
-                "horas_extras": ctx.formatar_horas(d["horas_extras"]),
-                "dia_incompleto": d["incompleto"],
-                "jornada_excepcional": d.get("excepcional", False),
-                "status_aprovacao": d.get("status_excepcional"),
-            })
+# Regras por expressão regular: pegam variações que a comparação por frase
+# inteira não pega — plural/singular, verbo conjugado ("trabalhei", "trabalhou"),
+# abreviações ("hrs") e erros de digitação comuns ("exxtras", "estras").
+REGRAS_REGEX = [
+    ("horas_extras", r"\b(?:h|hs|hr|hrs|hora|horas)\s+e?x+t?ras?\b", 30),
+    ("horas_extras", r"\bex+t?ras?\b", 24),
+    ("horas_extras", r"banco de horas|saldo de horas|sobrejornada", 30),
+    ("horas_trabalhadas", r"\btrabalh\w+", 20),
+    ("horas_trabalhadas", r"\bquant[ao]s?\s+(?:h|hs|hr|hrs|hora|horas)\b", 18),
+    ("horas_trabalhadas", r"carga hora|jornada cumprida|tempo trabalhado", 25),
+    ("atrasos", r"\batras\w+|chegou (?:tarde|atrasad)|pontualidade", 25),
+    ("faltas", r"\bfalt\w+|\bausen\w+|dias? sem registro|nao comparec\w+|nao veio", 25),
+    ("presentes_hoje", r"quem\s+(?:ja\s+|ainda\s+)?(?:nao\s+)?bateu", 40),
+    ("presentes_hoje", r"quem (?:esta|estao) (?:presente|trabalhando)|presentes hoje|presenca hoje", 40),
+    ("registros_incompletos", r"\bincomplet\w+|esqueceu de bater|sem (?:saida|entrada)|ponto aberto", 30),
+    ("pendencias", r"\bpendenc\w+|aguardando (?:aprovacao|revisao)|para aprovar|preciso aprovar", 30),
+    ("pendencias", r"solicitac\w+|ajustes? pendente|jornada excepcional", 26),
+    ("ranking", r"quem tem mais|quem fez mais|quem mais|ranking|top \d|maior numero", 32),
+    ("ranking", r"resumo (?:da|do) (?:equipe|time)|por colaborador|de toda a equipe", 30),
+    ("ultimo_ponto", r"ultim[oa] (?:ponto|batida|registro|marcacao)|que horas (?:chegou|saiu|entrou)", 32),
+    ("resumo_dia", r"espelho de ponto|resumo do dia|batidas do dia|como foi o dia|marcacoes do dia", 32),
+    ("configuracao", r"jornada padrao|horario padrao|meta de horas|horario da empresa", 30),
+    ("ajuda", r"o que voce (?:faz|sabe|consegue)|como (?:te )?us[ao]|me ajuda|^ajuda$|exemplos? de pergunta", 30),
+    ("resumo_colaborador", r"como (?:esta|vai|anda)\b|situacao (?:de|do|da)\b|resumo (?:de|do|da)\b", 16),
+]
 
-        return {
-            "colaborador": colaborador.nome,
-            "periodo": f"{dia_inicial.isoformat()} a {dia_final.isoformat()}",
-            "horario_padrao": f"{config.horario_entrada} às {config.horario_saida}",
-            "dias": detalhes,
-            "observacao": "Sem nenhuma batida no período." if not detalhes else None,
-        }
 
-    # --- ferramenta: situacao_agora ------------------------------------
+def _pontuar_intencoes(texto_normalizado):
+    pontuacoes = {}
+    for intencao, frases in INTENCOES.items():
+        melhor = 0
+        for frase in frases:
+            if frase in texto_normalizado:
+                melhor = max(melhor, len(frase))
+        if melhor:
+            pontuacoes[intencao] = melhor
 
-    def ferramenta_situacao_agora(_args):
-        from collections import defaultdict
+    for intencao, padrao, peso in REGRAS_REGEX:
+        if re.search(padrao, texto_normalizado):
+            pontuacoes[intencao] = max(pontuacoes.get(intencao, 0), peso)
 
-        config = ctx.obter_configuracao()
-        agora = ctx.agora_brasilia()
-        hoje = agora.date()
-        colaboradores = _colaboradores_ativos()
+    # "quantas horas EXTRAS ..." é sobre extra, não sobre carga horária.
+    if "horas_extras" in pontuacoes and "horas_trabalhadas" in pontuacoes:
+        if re.search(r"e?x+t?ras?\b", texto_normalizado):
+            pontuacoes["horas_trabalhadas"] = 0
 
-        limite_utc = datetime.combine(hoje, datetime.min.time()) - timedelta(hours=6)
-        candidatos = (
-            ctx.RegistroPonto.query
-            .filter(ctx.RegistroPonto.data_hora >= limite_utc)
-            .order_by(ctx.RegistroPonto.data_hora.asc())
-            .all()
-        )
-        por_colaborador = defaultdict(list)
-        for r in candidatos:
-            if ctx.para_brasilia(r.data_hora).date() == hoje:
-                por_colaborador[r.colaborador_id].append(r)
+    return {k: v for k, v in pontuacoes.items() if v > 0}
 
-        domingo = ctx.eh_domingo(hoje)
-        presentes, atrasados, sem_registro = [], [], []
-        for c in colaboradores:
-            regs = por_colaborador.get(c.id)
-            if not regs:
-                if not domingo:
-                    sem_registro.append(c.nome)
-                continue
-            primeira = ctx.para_brasilia(regs[0].data_hora)
-            ultima = regs[-1]
-            presentes.append({
-                "colaborador": c.nome,
-                "primeira_batida": primeira.strftime("%H:%M"),
-                "ultima_batida": ctx.para_brasilia(ultima.data_hora).strftime("%H:%M"),
-                "ultimo_tipo": ultima.tipo,
-                "esta_trabalhando_agora": (ultima.tipo or "").lower() == "entrada",
-            })
-            if not domingo and primeira.strftime("%H:%M") > config.horario_entrada:
-                atrasados.append({"colaborador": c.nome, "entrou_as": primeira.strftime("%H:%M")})
 
-        ajustes = (
-            ctx.SolicitacaoAjuste.query
-            .filter_by(status="pendente")
-            .order_by(ctx.SolicitacaoAjuste.criado_em.desc())
-            .limit(20)
-            .all()
-        )
-        excepcionais = (
-            ctx.AprovacaoJornadaExcepcional.query
-            .filter_by(status="pendente")
-            .order_by(ctx.AprovacaoJornadaExcepcional.data_referencia.desc())
-            .limit(20)
-            .all()
-        )
-        nomes = {c.id: c.nome for c in ctx.Colaborador.query.all()}
+# ---------------------------------------------------------------------------
+# Assistente
+# ---------------------------------------------------------------------------
+class Assistente:
+    """Motor de perguntas e respostas. Recebe um `ctx` (SimpleNamespace) com os
+    modelos e funções do app — ver `criar_assistente` em app.py."""
 
-        return {
-            "agora": agora.strftime("%d/%m/%Y %H:%M"),
-            "hoje_e_domingo": domingo,
-            "horario_padrao": f"{config.horario_entrada} às {config.horario_saida}",
-            "total_colaboradores": len(colaboradores),
-            "bateram_ponto_hoje": presentes,
-            "atrasados_hoje": atrasados,
-            "sem_nenhuma_batida_hoje": sem_registro,
-            "ajustes_pendentes": [
-                {
-                    "colaborador": nomes.get(a.colaborador_id, "?"),
-                    "data": a.data_referencia.isoformat(),
-                    "tipo": a.tipo,
-                    "horario_solicitado": a.horario_solicitado,
-                    "motivo": a.motivo,
-                }
-                for a in ajustes
-            ],
-            "jornadas_excepcionais_pendentes": [
-                {
-                    "colaborador": nomes.get(j.colaborador_id, "?"),
-                    "data": j.data_referencia.isoformat(),
-                    "horas": ctx.formatar_horas(j.horas_total),
-                }
-                for j in excepcionais
-            ],
-        }
+    LIMITE_LINHAS = 10  # nunca devolve mais de 10 linhas de detalhe (mesma regra das telas)
 
-    # ------------------------------------------------------------------
-    # Catálogo de ferramentas enviado ao modelo
-    # ------------------------------------------------------------------
-
-    FERRAMENTAS = [
-        {
-            "name": "listar_colaboradores",
-            "description": (
-                "Lista todos os colaboradores cadastrados (nome, e-mail, se está ativo e se tem "
-                "cadastro facial). Use quando o gestor perguntar quem trabalha na empresa, quantas "
-                "pessoas existem, ou quando precisar confirmar o nome exato de alguém."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "horas_extras",
-            "description": (
-                "Horas extras de um colaborador ou de toda a equipe em um mês, com o detalhe dia a dia. "
-                "Usa exatamente o mesmo cálculo da tela 'Horas Extras' do painel."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "nome": {
-                        "type": "string",
-                        "description": "Nome do colaborador. Omita para trazer a equipe inteira (ranking do maior para o menor).",
-                    },
-                    "mes": {
-                        "type": "string",
-                        "description": "Mês no formato AAAA-MM. Omita para o mês atual.",
-                    },
-                },
-            },
-        },
-        {
-            "name": "ausencias",
-            "description": (
-                "Dias úteis em que o colaborador não bateu ponto nenhuma vez no mês. ATENÇÃO: o sistema "
-                "não registra faltas, férias, atestados nem feriados — isso é um indício de ausência, "
-                "não uma falta confirmada. Sempre deixe essa ressalva clara na resposta."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "nome": {"type": "string", "description": "Nome do colaborador. Omita para a equipe inteira."},
-                    "mes": {"type": "string", "description": "Mês no formato AAAA-MM. Omita para o mês atual."},
-                    "contar_sabado": {
-                        "type": "boolean",
-                        "description": "Se sábado conta como dia útil. Padrão: true (regra atual do sistema).",
-                    },
-                },
-            },
-        },
-        {
-            "name": "registros_do_periodo",
-            "description": (
-                "Batidas de ponto de um colaborador em um período: horários de entrada e saída de cada dia, "
-                "total trabalhado, se chegou atrasado e se o dia ficou incompleto. Use para perguntas como "
-                "'a que horas o João entrou ontem?', 'quantos atrasos a Maria teve na semana passada?'."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "nome": {"type": "string", "description": "Nome do colaborador."},
-                    "data_inicio": {"type": "string", "description": "Data inicial AAAA-MM-DD. Padrão: 7 dias antes da data final."},
-                    "data_fim": {"type": "string", "description": "Data final AAAA-MM-DD. Padrão: hoje."},
-                },
-                "required": ["nome"],
-            },
-        },
-        {
-            "name": "situacao_agora",
-            "description": (
-                "Fotografia do dia de hoje: quem já bateu ponto, quem está trabalhando neste momento, "
-                "quem chegou atrasado, quem ainda não apareceu, e o que está pendente de aprovação "
-                "(solicitações de ajuste e jornadas excepcionais)."
-            ),
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ]
-
-    EXECUTORES = {
-        "listar_colaboradores": ferramenta_listar_colaboradores,
-        "horas_extras": ferramenta_horas_extras,
-        "ausencias": ferramenta_ausencias,
-        "registros_do_periodo": ferramenta_registros,
-        "situacao_agora": ferramenta_situacao_agora,
+    # Intenções que fazem sentido tanto para uma pessoa quanto para a equipe —
+    # nelas, um nome não reconhecido deve virar pergunta de volta, não relatório
+    # geral.
+    INTENCOES_PESSOAIS = {
+        "horas_extras", "horas_trabalhadas", "atrasos", "faltas", "registros_incompletos",
+        "resumo_dia", "resumo_colaborador", "ultimo_ponto", "custo_extras",
     }
 
-    def _prompt_sistema():
-        agora = ctx.agora_brasilia()
-        marca = ctx.obter_marca()
-        return (
-            f"Você é o assistente do gestor do {marca.nome_empresa}, um sistema de controle de ponto "
-            "com reconhecimento facial. O gestor conversa com você por voz ou por texto, muitas vezes "
-            "pelo celular, no meio do expediente.\n\n"
-            f"Data e hora agora: {agora.strftime('%d/%m/%Y %H:%M')} ({_dia_semana(agora)}), fuso de Brasília.\n\n"
-            "REGRAS:\n"
-            "1. Nunca invente números. Todo dado vem das ferramentas. Se a ferramenta não trouxer, "
-            "diga que o sistema não tem essa informação.\n"
-            "2. A pergunta pode vir de transcrição de voz, com nome errado ou palavra faltando. "
-            "Interprete a intenção; a busca por nome já tolera erro de grafia. Se ficar ambíguo entre "
-            "duas pessoas, pergunte qual delas.\n"
-            "3. Responda em português do Brasil, curto e falado — a resposta pode ser lida em voz alta. "
-            "Comece pelo número que ele pediu, depois um detalhe útil se houver. "
-            "Nada de tabelas, markdown ou listas longas: no máximo 3 ou 4 frases. "
-            "Se o gestor pedir o detalhe dia a dia, aí sim liste os dias.\n"
-            "4. Horas sempre no formato falado: '12h30min', '45min', '3h'.\n"
-            "5. Datas em português: 'dia 12 de agosto', 'ontem', 'na terça'.\n"
-            "6. Sobre faltas: o sistema NÃO tem cadastro de falta, férias, atestado ou feriado. "
-            "O que existe é 'dia útil sem nenhuma batida'. Sempre avise isso ao responder sobre faltas.\n"
-            "7. Você é somente leitura: não aprova ajustes, não altera nada. Se pedirem uma ação, "
-            "explique em que tela do painel isso é feito (Ajustes, Horas Extras, Cadastro, Configurações).\n"
-            "8. Se a pergunta não tiver nada a ver com ponto, jornada ou equipe, diga educadamente "
-            "que você só responde sobre os dados do controle de ponto."
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    # -- acesso a dados -----------------------------------------------------
+    def _colaboradores(self, incluir_inativos=True):
+        q = self.ctx.Colaborador.query.filter_by(is_gestor=False)
+        if not incluir_inativos:
+            q = q.filter_by(ativo=True)
+        return q.order_by(self.ctx.Colaborador.nome).all()
+
+    def _registros_periodo(self, periodo, colaborador_id=None):
+        RegistroPonto = self.ctx.RegistroPonto
+        inicio_utc = datetime.combine(periodo.inicio, datetime.min.time()) - timedelta(hours=6)
+        fim_utc = datetime.combine(periodo.fim, datetime.max.time()) + timedelta(hours=6)
+        q = RegistroPonto.query.filter(
+            RegistroPonto.data_hora >= inicio_utc, RegistroPonto.data_hora <= fim_utc
         )
+        if colaborador_id:
+            q = q.filter_by(colaborador_id=colaborador_id)
+        registros = q.order_by(RegistroPonto.data_hora.asc()).all()
+        return [r for r in registros if periodo.contem(self.ctx.para_brasilia(r.data_hora).date())]
 
-    # ------------------------------------------------------------------
-    # Rotas
-    # ------------------------------------------------------------------
-
-    def assistente_habilitado():
-        return bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-    @bp.route("/gestor/assistente", methods=["GET"])
-    @ctx.gestor_required
-    def gestor_assistente():
-        return render_template(
-            "gestor_assistente.html",
-            habilitado=assistente_habilitado(),
-            nome_gestor=session.get("nome", ""),
-        )
-
-    @bp.route("/api/gestor/perguntar", methods=["POST"])
-    @ctx.gestor_required
-    def api_perguntar():
-        if not assistente_habilitado():
-            return jsonify({
-                "erro": "O assistente está desligado: falta a variável de ambiente ANTHROPIC_API_KEY."
-            }), 503
-
+    def _status_excepcional(self, colaborador_id, dia):
+        """Lê (sem criar nada) o status da aprovação de uma jornada excepcional."""
         try:
-            from anthropic import Anthropic
-        except ImportError:
-            return jsonify({
-                "erro": "Biblioteca 'anthropic' não instalada. Rode: pip install anthropic"
-            }), 503
+            aprovacao = self.ctx.AprovacaoJornadaExcepcional.query.filter_by(
+                colaborador_id=colaborador_id, data_referencia=dia
+            ).first()
+            return aprovacao.status if aprovacao else "pendente"
+        except Exception:
+            return "pendente"
 
-        dados = request.get_json(silent=True) or {}
-        pergunta = (dados.get("pergunta") or "").strip()[:MAX_CARACTERES_PERGUNTA]
+    def _resumo(self, colaborador, periodo):
+        """Números do colaborador no período: horas, extras, atrasos, faltas,
+        dias incompletos e jornadas retidas para aprovação."""
+        ctx = self.ctx
+        config = ctx.obter_configuracao()
+        hoje = ctx.agora_brasilia().date()
+
+        registros = self._registros_periodo(periodo, colaborador.id)
+        dias = [d for d in ctx.montar_resumo_diario(registros) if periodo.contem(d["data"])]
+
+        total_horas = 0.0
+        total_extra = 0.0
+        extra_retida = 0.0
+        atrasos = []
+        incompletos = []
+        retidos = []
+
+        for dia in dias:
+            total_horas += dia["total_horas_decimal"]
+            extra = ctx.calcular_horas_extras_dia(
+                dia["total_horas_decimal"], config.horario_entrada, config.horario_saida,
+                eh_domingo_flag=ctx.eh_domingo(dia["data"]),
+            )
+            dia["horas_extras"] = extra
+            if dia.get("excepcional"):
+                status = self._status_excepcional(colaborador.id, dia["data"])
+                dia["status_excepcional"] = status
+                if status != "aprovado":
+                    extra_retida += extra
+                    dia["horas_extras"] = 0.0
+                    retidos.append(dia)
+                    extra = 0.0
+            total_extra += extra
+
+            if dia["incompleto"]:
+                incompletos.append(dia)
+            if dia["batidas"] and not ctx.eh_domingo(dia["data"]):
+                primeira = min(dia["batidas"])
+                if primeira.strftime("%H:%M") > config.horario_entrada:
+                    atrasos.append((dia["data"], primeira))
+
+        dias_com_registro = {d["data"] for d in dias if d["batidas"]}
+        faltas = []
+        cursor = periodo.inicio
+        limite = min(periodo.fim, hoje)
+        while cursor <= limite:
+            if not ctx.eh_domingo(cursor) and cursor not in dias_com_registro:
+                faltas.append(cursor)
+            cursor += timedelta(days=1)
+
+        return {
+            "colaborador": colaborador,
+            "dias": dias,
+            "total_horas": round(total_horas, 2),
+            "total_extra": round(total_extra, 2),
+            "extra_retida": round(extra_retida, 2),
+            "dias_trabalhados": len(dias_com_registro),
+            "atrasos": atrasos,
+            "faltas": faltas,
+            "incompletos": incompletos,
+            "retidos": retidos,
+            "config": config,
+        }
+
+    # -- identificação de pessoas ------------------------------------------
+    def _apelidos_aprendidos(self):
+        try:
+            return self.ctx.AssistenteApelido.query.all()
+        except Exception:
+            return []
+
+    def detectar_colaboradores(self, texto, limite_confianca=0.72):
+        """Devolve [(colaborador, confiança)] ordenado do mais provável para o
+        menos. Casa nome completo, primeiro nome, e-mail, apelidos aprendidos e
+        variações com erro de digitação."""
+        t = normalizar(texto)
+        palavras = tokens_uteis(t)
+        colaboradores = self._colaboradores()
+
+        apelidos = {}
+        for a in self._apelidos_aprendidos():
+            apelidos.setdefault(a.colaborador_id, []).append(normalizar(a.apelido))
+
+        resultados = []
+        for c in colaboradores:
+            nome_norm = normalizar(c.nome)
+            partes = [p for p in nome_norm.split() if len(p) > 1]
+            email_local = normalizar((c.email or "").split("@")[0].replace(".", " "))
+            melhor = 0.0
+
+            if nome_norm and nome_norm in t:
+                melhor = 1.0
+            if email_local and email_local in t:
+                melhor = max(melhor, 0.97)
+            for apelido in apelidos.get(c.id, []):
+                if apelido and re.search(rf"\b{re.escape(apelido)}\b", t):
+                    melhor = max(melhor, 0.95)
+
+            for parte in partes:
+                if re.search(rf"\b{re.escape(parte)}\b", t):
+                    # Nome próprio inteiro no texto: forte, ainda mais se for o primeiro nome.
+                    melhor = max(melhor, 0.93 if parte == partes[0] else 0.85)
+                for palavra in palavras:
+                    r = similaridade(parte, palavra)
+                    if r >= 0.8 and abs(len(parte) - len(palavra)) <= 3:
+                        melhor = max(melhor, r * 0.9)
+
+            if palavras:
+                melhor = max(melhor, similaridade(nome_norm, " ".join(palavras)) * 0.8)
+
+            if melhor >= limite_confianca:
+                resultados.append((c, round(melhor, 3)))
+
+        resultados.sort(key=lambda item: (-item[1], item[0].nome))
+        return resultados
+
+    # -- classificação ------------------------------------------------------
+    def _padroes_aprendidos(self):
+        try:
+            return self.ctx.AssistentePadrao.query.filter(
+                self.ctx.AssistentePadrao.peso > 0
+            ).all()
+        except Exception:
+            return []
+
+    def detectar_intencao(self, texto):
+        """Devolve (intencao, confianca, origem)."""
+        t = normalizar(texto)
+        pontuacoes = _pontuar_intencoes(t)
+
+        if pontuacoes:
+            intencao = max(pontuacoes, key=pontuacoes.get)
+            confianca = min(0.99, 0.6 + pontuacoes[intencao] / 40)
+            return intencao, round(confianca, 2), "regra"
+
+        # Nada bateu nas regras fixas: tenta o que já foi aprendido com o uso.
+        melhor, melhor_r = None, 0.0
+        for padrao in self._padroes_aprendidos():
+            r = similaridade(t, padrao.padrao)
+            if r > melhor_r:
+                melhor, melhor_r = padrao, r
+        if melhor and melhor_r >= 0.62:
+            return melhor.intencao, round(melhor_r, 2), "aprendido"
+
+        # Perguntas curtas com nome de gente e nada mais ("e a maria?") herdam a
+        # intenção mais comum do histórico daquele usuário.
+        if self.detectar_colaboradores(texto):
+            return "resumo_colaborador", 0.5, "inferido"
+
+        return "desconhecida", 0.0, "nenhuma"
+
+    # -- ponto de entrada ---------------------------------------------------
+    def responder(self, pergunta, usuario, colaborador_forcado=None):
+        """Responde a pergunta respeitando o escopo do usuário.
+
+        Gestor: pode perguntar sobre qualquer colaborador e sobre a equipe.
+        Colaborador: só enxerga os próprios dados — qualquer pergunta sobre
+        outra pessoa (ou sobre a equipe) é recusada de forma educada.
+
+        `colaborador_forcado` é usado quando o gestor CORRIGE o assistente
+        ("era sobre a Joana"): a pergunta é refeita já sabendo de quem se trata."""
+        ctx = self.ctx
+        hoje = ctx.agora_brasilia().date()
+        pergunta = (pergunta or "").strip()
         if not pergunta:
-            return jsonify({"erro": "Pergunta vazia."}), 400
+            return self._resposta("Pode escrever sua pergunta que eu respondo com os dados do ponto.",
+                                  intencao="vazia")
 
-        # Histórico vindo do navegador (só do próprio gestor logado), limitado
-        # para manter o custo previsível.
-        mensagens = []
-        for m in (dados.get("historico") or [])[-MAX_MENSAGENS_HISTORICO:]:
-            papel = m.get("role")
-            conteudo = str(m.get("content") or "")[:2000]
-            if papel in ("user", "assistant") and conteudo:
-                mensagens.append({"role": papel, "content": conteudo})
-        mensagens.append({"role": "user", "content": pergunta})
+        eh_gestor = bool(getattr(usuario, "is_gestor", False))
+        periodo = detectar_periodo(pergunta, hoje)
+        intencao, confianca, origem = self.detectar_intencao(pergunta)
+        candidatos = self.detectar_colaboradores(pergunta)
 
-        cliente = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        modelo = os.environ.get("ANTHROPIC_MODEL", MODELO_PADRAO)
-
-        ferramentas_usadas = []
-        try:
-            for _ in range(MAX_ITERACOES_FERRAMENTA):
-                resposta = cliente.messages.create(
-                    model=modelo,
-                    max_tokens=1024,
-                    system=_prompt_sistema(),
-                    tools=FERRAMENTAS,
-                    messages=mensagens,
+        if not eh_gestor:
+            # Colaborador citando OUTRA pessoa: recusa antes de qualquer cálculo.
+            outros = [c for c, _ in candidatos if c.id != usuario.id]
+            if outros:
+                return self._resposta(
+                    f"Só posso mostrar os seus próprios dados de ponto — informações de "
+                    f"{outros[0].nome} são visíveis apenas para o gestor.",
+                    intencao="fora_do_escopo",
+                    sugestoes=["Quantas horas extras eu tenho este mês?",
+                               "Quantas horas trabalhei este mês?"],
                 )
 
-                if resposta.stop_reason != "tool_use":
-                    texto = "".join(b.text for b in resposta.content if b.type == "text").strip()
-                    return jsonify({
-                        "resposta": texto or "Não consegui responder isso.",
-                        "ferramentas_usadas": ferramentas_usadas,
-                    })
+        if colaborador_forcado is not None and eh_gestor:
+            candidatos = [(colaborador_forcado, 1.0)]
+            if intencao in ("desconhecida", "sem_colaborador", "ambiguo"):
+                intencao, confianca, origem = "resumo_colaborador", 0.9, "correcao"
 
-                # O modelo pediu uma ou mais ferramentas: executa e devolve o resultado.
-                mensagens.append({"role": "assistant", "content": resposta.content})
-                resultados = []
-                for bloco in resposta.content:
-                    if bloco.type != "tool_use":
-                        continue
-                    executor = EXECUTORES.get(bloco.name)
-                    ferramentas_usadas.append(bloco.name)
-                    try:
-                        saida = executor(bloco.input or {}) if executor else {"erro": "Ferramenta desconhecida."}
-                    except Exception as ex:
-                        ctx.db.session.rollback()
-                        print(f"[assistente] erro na ferramenta {bloco.name}: {ex}")
-                        saida = {"erro": f"Falha ao consultar os dados: {ex}"}
-                    resultados.append({
-                        "type": "tool_result",
-                        "tool_use_id": bloco.id,
-                        "content": json.dumps(saida, ensure_ascii=False, default=str),
-                    })
-                mensagens.append({"role": "user", "content": resultados})
+        if not eh_gestor:
+            # Escopo do colaborador: sempre ele mesmo, e sem intenções de equipe.
+            if intencao in ("ranking", "presentes_hoje", "pendencias", "custo_extras"):
+                if intencao == "pendencias":
+                    return self._minhas_solicitacoes(usuario, periodo)
+                return self._resposta(
+                    "Só consigo mostrar os seus próprios dados de ponto. Para informações da "
+                    "equipe, fale com o gestor.",
+                    intencao="fora_do_escopo",
+                )
+            alvo = usuario
+            candidatos = [(usuario, 1.0)]
+        else:
+            alvo = candidatos[0][0] if candidatos else None
 
-            return jsonify({
-                "resposta": "Essa pergunta ficou complexa demais para eu responder de uma vez. "
-                            "Pode quebrar em partes menores?",
-                "ferramentas_usadas": ferramentas_usadas,
-            })
+        # A pergunta cita alguém que o sistema não conhece? (ex.: um apelido novo).
+        # Nesse caso é melhor perguntar de quem se trata do que responder sobre a
+        # equipe inteira como se a pessoa não tivesse sido citada.
+        if eh_gestor and alvo is None and intencao in self.INTENCOES_PESSOAIS:
+            if termos_para_apelido(pergunta, ""):
+                return self._exige_colaborador(None, periodo, "Quantas horas extras FULANO tem este mês?")
 
-        except Exception as ex:
-            print(f"[assistente] erro: {ex}")
-            return jsonify({"erro": f"Não consegui falar com o assistente agora. ({type(ex).__name__})"}), 502
+        # Ambiguidade: dois nomes parecidos com confiança quase igual.
+        if eh_gestor and len(candidatos) > 1 and candidatos[0][1] - candidatos[1][1] < 0.06:
+            return self._resposta(
+                "Encontrei mais de um colaborador que combina com esse nome. De quem você quer saber?",
+                intencao="ambiguo",
+                opcoes=[c for c, _ in candidatos[:5]],
+                periodo=periodo,
+            )
 
-    # Exposto para teste manual sem gastar chamada de API:
-    #   from app import app
-    #   app.blueprints["assistente"].executores["horas_extras"]({"nome": "Alex"})
-    bp.executores = EXECUTORES
+        despachante = {
+            "horas_extras": self._horas_extras,
+            "horas_trabalhadas": self._horas_trabalhadas,
+            "atrasos": self._atrasos,
+            "faltas": self._faltas,
+            "registros_incompletos": self._incompletos,
+            "resumo_dia": self._resumo_dia,
+            "resumo_colaborador": self._resumo_colaborador,
+            "ultimo_ponto": self._ultimo_ponto,
+            "presentes_hoje": self._presentes_hoje,
+            "pendencias": self._pendencias,
+            "ranking": self._ranking,
+            "configuracao": self._configuracao,
+            "custo_extras": self._custo_extras,
+            "ajuda": self._ajuda,
+        }
 
-    app.register_blueprint(bp)
-    return bp
+        funcao = despachante.get(intencao)
+        if funcao is None:
+            return self._nao_entendi(pergunta, eh_gestor)
+
+        try:
+            resposta = funcao(alvo=alvo, periodo=periodo, usuario=usuario, eh_gestor=eh_gestor,
+                              pergunta=pergunta)
+        except Exception as ex:  # nunca derruba o chat por causa de um dado estranho
+            print(f"[assistente] falha ao responder '{pergunta}': {ex}")
+            return self._resposta(
+                "Tive um problema para calcular essa resposta agora. Tente reformular a pergunta "
+                "ou consultar a tela correspondente.",
+                intencao="erro",
+            )
+
+        resposta["intencao"] = intencao
+        resposta["confianca"] = confianca
+        resposta["origem_intencao"] = origem
+        resposta.setdefault("periodo", periodo.rotulo)
+        return resposta
+
+    # -- montagem de resposta ----------------------------------------------
+    def _resposta(self, texto, intencao=None, detalhes=None, colunas=None, sugestoes=None,
+                  periodo=None, destaque=None, opcoes=None):
+        return {
+            "resposta": texto,
+            "intencao": intencao,
+            # A regra de "no máximo 10 registros por vez" vale também aqui: o chat
+            # nunca despeja uma tabela gigante — mostra 10 e diz quantos existem.
+            "detalhes": (detalhes or [])[: self.LIMITE_LINHAS],
+            "detalhes_total": len(detalhes or []),
+            "colunas": colunas or [],
+            "sugestoes": sugestoes or [],
+            "periodo": periodo.rotulo if isinstance(periodo, Periodo) else periodo,
+            "destaque": destaque,
+            # Botões "era sobre quem?" — clicar neles ensina o assistente.
+            "opcoes": [{"id": c.id, "nome": c.nome} for c in (opcoes or [])],
+        }
+
+    def _eh_proprio(self, alvo, usuario):
+        """A pergunta é do colaborador sobre ele mesmo? (muda o tratamento para
+        a 2ª pessoa: "Você tem 3h de hora extra" em vez de "Fulano tem...")."""
+        return (alvo is not None and usuario is not None
+                and getattr(usuario, "id", None) == alvo.id
+                and not getattr(usuario, "is_gestor", False))
+
+    def _tratar(self, alvo, usuario):
+        return "Você" if self._eh_proprio(alvo, usuario) else f"**{alvo.nome}**"
+
+    def _exige_colaborador(self, alvo, periodo, exemplo):
+        if alvo is not None:
+            return None
+        colaboradores = self._colaboradores(incluir_inativos=False)
+        nomes = [c.nome.split()[0] for c in colaboradores[:3]]
+        sugestoes = [exemplo.replace("FULANO", n) for n in nomes] or [exemplo.replace("FULANO", "Maria")]
+        return self._resposta(
+            "Não identifiquei de qual colaborador você está falando. Clique no nome abaixo — eu "
+            "aprendo esse apelido e acerto da próxima vez. Ou pergunte sobre a equipe toda "
+            "(ex.: \"quem tem mais horas extras este mês?\").",
+            intencao="sem_colaborador",
+            sugestoes=sugestoes,
+            opcoes=colaboradores[:8],
+            periodo=periodo,
+        )
+
+    # -- respostas por intenção --------------------------------------------
+    def _horas_extras(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        if alvo is None:
+            return self._ranking(alvo=None, periodo=periodo, eh_gestor=eh_gestor, usuario=usuario, **kwargs)
+
+        r = self._resumo(alvo, periodo)
+        extra_txt = ctx.formatar_horas(r["total_extra"])
+
+        linhas = []
+        for dia in sorted([d for d in r["dias"] if d["horas_extras"] > 0 or d in r["retidos"]],
+                          key=lambda d: d["data"], reverse=True):
+            linhas.append([
+                formatar_data(dia["data"]),
+                dia["total_horas"],
+                ctx.formatar_horas(dia["horas_extras"]) if dia["horas_extras"] else "retida",
+            ])
+
+        texto = (f"{self._tratar(alvo, usuario)} tem **{extra_txt}** de hora extra {periodo.frase}"
+                 f" ({r['dias_trabalhados']} dia(s) com registro, {ctx.formatar_horas(r['total_horas'])} trabalhadas).")
+
+        if r["extra_retida"] > 0:
+            texto += (f"\n\n⚠️ Além disso, **{ctx.formatar_horas(r['extra_retida'])}** estão retidas: "
+                      f"{len(r['retidos'])} jornada(s) acima do limite aguardando sua aprovação em "
+                      f"*Ajustes*. Só entram no total depois de aprovadas.")
+        if r["incompletos"]:
+            texto += (f"\n\n📌 {len(r['incompletos'])} dia(s) estão incompletos (falta bater um ponto), "
+                      f"então a hora extra deles ainda não foi contada.")
+        if not periodo.explicito:
+            texto += f"\n\n_Considerei {periodo.rotulo}. Dá para pedir outro período, ex.: \"mês passado\"._"
+
+        # Comparação com o histórico do próprio colaborador — leitura que só faz
+        # sentido depois que a empresa acumula dados.
+        media = self._media_extra_meses_anteriores(alvo, periodo)
+        if media is not None and r["total_extra"] > 0:
+            if r["total_extra"] > media * 1.25:
+                texto += f"\n\n📈 Está acima da média dos meses anteriores desse colaborador ({ctx.formatar_horas(media)})."
+            elif r["total_extra"] < media * 0.75:
+                texto += f"\n\n📉 Está abaixo da média dos meses anteriores desse colaborador ({ctx.formatar_horas(media)})."
+
+        return self._resposta(
+            texto,
+            detalhes=linhas,
+            colunas=["Dia", "Trabalhado", "Hora extra"],
+            periodo=periodo,
+            destaque=extra_txt,
+            sugestoes=[
+                f"Quantas horas {alvo.nome.split()[0]} trabalhou {periodo.frase}?",
+                f"{alvo.nome.split()[0]} teve atrasos {periodo.frase}?",
+                "Quem tem mais horas extras este mês?",
+            ],
+        )
+
+    def _media_extra_meses_anteriores(self, colaborador, periodo, meses=3):
+        """Média de hora extra do colaborador nos meses anteriores ao período
+        perguntado (None se não houver histórico suficiente)."""
+        try:
+            referencia = _primeiro_dia_mes(periodo.inicio)
+            totais = []
+            for _ in range(meses):
+                fim = referencia - timedelta(days=1)
+                inicio = _primeiro_dia_mes(fim)
+                r = self._resumo(colaborador, Periodo(inicio, fim, nome_mes(inicio)))
+                if r["dias_trabalhados"]:
+                    totais.append(r["total_extra"])
+                referencia = inicio
+            return round(sum(totais) / len(totais), 2) if totais else None
+        except Exception:
+            return None
+
+    def _horas_trabalhadas(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        faltou = self._exige_colaborador(alvo, periodo, "Quantas horas FULANO trabalhou este mês?")
+        if faltou:
+            return faltou
+
+        r = self._resumo(alvo, periodo)
+        media_dia = (r["total_horas"] / r["dias_trabalhados"]) if r["dias_trabalhados"] else 0
+        texto = (f"{self._tratar(alvo, usuario)} trabalhou **{ctx.formatar_horas(r['total_horas'])}** "
+                 f"{periodo.frase}, em {r['dias_trabalhados']} dia(s) com registro "
+                 f"(média de {ctx.formatar_horas(media_dia)} por dia). "
+                 f"Hora extra no período: {ctx.formatar_horas(r['total_extra'])}.")
+        if r["incompletos"]:
+            texto += f"\n\n📌 {len(r['incompletos'])} dia(s) incompletos podem estar reduzindo esse total."
+
+        linhas = [[formatar_data(d["data"]), d["total_horas"],
+                   ctx.formatar_horas(d["horas_extras"]) if d["horas_extras"] else "—"]
+                  for d in sorted(r["dias"], key=lambda d: d["data"], reverse=True) if d["batidas"]]
+        return self._resposta(texto, detalhes=linhas, colunas=["Dia", "Trabalhado", "Extra"],
+                              periodo=periodo, destaque=ctx.formatar_horas(r["total_horas"]))
+
+    def _atrasos(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        config = ctx.obter_configuracao()
+        if alvo is None:
+            linhas = []
+            for c in self._colaboradores(incluir_inativos=False):
+                r = self._resumo(c, periodo)
+                if r["atrasos"]:
+                    linhas.append([c.nome, len(r["atrasos"]),
+                                   formatar_data(max(a[0] for a in r["atrasos"]))])
+            linhas.sort(key=lambda l: -l[1])
+            if not linhas:
+                return self._resposta(f"Ninguém chegou depois de {config.horario_entrada} {periodo.frase}. 👏",
+                                      periodo=periodo)
+            texto = (f"Atrasos {periodo.frase} (entrada padrão {config.horario_entrada}) — "
+                     f"{len(linhas)} colaborador(es):")
+            return self._resposta(texto, detalhes=linhas,
+                                  colunas=["Colaborador", "Dias com atraso", "Último"], periodo=periodo)
+
+        r = self._resumo(alvo, periodo)
+        if not r["atrasos"]:
+            return self._resposta(
+                f"{self._tratar(alvo, usuario)} não teve atrasos {periodo.frase} (entrada padrão {config.horario_entrada}).",
+                periodo=periodo, destaque="0 atrasos")
+        linhas = [[formatar_data(d), h.strftime("%H:%M"), config.horario_entrada]
+                  for d, h in sorted(r["atrasos"], reverse=True)]
+        return self._resposta(
+            f"{self._tratar(alvo, usuario)} teve **{len(r['atrasos'])} atraso(s)** {periodo.frase} "
+            f"(primeira batida depois de {config.horario_entrada}).",
+            detalhes=linhas, colunas=["Dia", "Chegou", "Previsto"], periodo=periodo,
+            destaque=f"{len(r['atrasos'])} atraso(s)")
+
+    def _faltas(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        if alvo is None:
+            linhas = []
+            for c in self._colaboradores(incluir_inativos=False):
+                r = self._resumo(c, periodo)
+                if r["faltas"]:
+                    linhas.append([c.nome, len(r["faltas"]), formatar_data(max(r["faltas"]))])
+            linhas.sort(key=lambda l: -l[1])
+            if not linhas:
+                return self._resposta(f"Nenhum dia útil sem registro {periodo.frase}.", periodo=periodo)
+            return self._resposta(
+                f"Dias úteis sem nenhuma batida {periodo.frase} (domingos não contam):",
+                detalhes=linhas, colunas=["Colaborador", "Dias sem registro", "Mais recente"],
+                periodo=periodo)
+
+        r = self._resumo(alvo, periodo)
+        if not r["faltas"]:
+            return self._resposta(f"{self._tratar(alvo, usuario)} bateu ponto em todos os dias úteis {periodo.frase}.",
+                                  periodo=periodo, destaque="0 dias sem registro")
+        linhas = [[formatar_data(d), DIAS_SEMANA[d.weekday()]] for d in sorted(r["faltas"], reverse=True)]
+        return self._resposta(
+            f"{self._tratar(alvo, usuario)} ficou **{len(r['faltas'])} dia(s) úteis sem nenhuma batida** "
+            f"{periodo.frase}. Isso pode ser falta, férias ou atestado — o sistema só sabe que não houve registro.",
+            detalhes=linhas, colunas=["Dia", "Dia da semana"], periodo=periodo,
+            destaque=f"{len(r['faltas'])} dia(s)")
+
+    def _incompletos(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        if alvo is None:
+            linhas = []
+            for c in self._colaboradores(incluir_inativos=False):
+                r = self._resumo(c, periodo)
+                if r["incompletos"]:
+                    linhas.append([c.nome, len(r["incompletos"]),
+                                   formatar_data(max(d["data"] for d in r["incompletos"]))])
+            linhas.sort(key=lambda l: -l[1])
+            if not linhas:
+                return self._resposta(f"Nenhum dia incompleto {periodo.frase}. Todos os pares entrada/saída fecharam.",
+                                      periodo=periodo)
+            return self._resposta(
+                f"Dias com batida faltando {periodo.frase} (entrada sem saída, ou o contrário):",
+                detalhes=linhas, colunas=["Colaborador", "Dias incompletos", "Mais recente"],
+                periodo=periodo)
+
+        r = self._resumo(alvo, periodo)
+        if not r["incompletos"]:
+            return self._resposta(f"{self._tratar(alvo, usuario)} não tem dias incompletos {periodo.frase}.",
+                                  periodo=periodo, destaque="tudo fechado")
+        linhas = [[formatar_data(d["data"]), len(d["batidas"]), d["total_horas"]]
+                  for d in sorted(r["incompletos"], key=lambda d: d["data"], reverse=True)]
+        return self._resposta(
+            f"{self._tratar(alvo, usuario)} tem **{len(r['incompletos'])} dia(s) incompletos** {periodo.frase}. "
+            f"Esses dias precisam de uma solicitação de ajuste para o cálculo ficar correto.",
+            detalhes=linhas, colunas=["Dia", "Batidas", "Total apurado"], periodo=periodo)
+
+    def _resumo_dia(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        faltou = self._exige_colaborador(alvo, periodo, "Como foi o dia de FULANO ontem?")
+        if faltou:
+            return faltou
+        dia = periodo.fim
+        registros = ctx.registros_do_dia(alvo.id, dia)
+        if not registros:
+            return self._resposta(f"{self._tratar(alvo, usuario)} não tem nenhuma batida em {formatar_data(dia)}.",
+                                  periodo=periodo)
+        linhas = [[ctx.para_brasilia(r.data_hora).strftime("%H:%M:%S"),
+                   "Entrada" if (r.tipo or "") == "entrada" else "Saída",
+                   (r.endereco or "—")[:60]] for r in registros]
+        resumo = ctx.montar_resumo_diario(registros)
+        total = resumo[0]["total_horas"] if resumo else "00:00"
+        return self._resposta(
+            f"Batidas de **{alvo.nome}** em {formatar_data(dia)} — {len(registros)} marcação(ões), "
+            f"total apurado de {total}.",
+            detalhes=linhas, colunas=["Hora", "Tipo", "Local"], periodo=periodo, destaque=total)
+
+    def _resumo_colaborador(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        faltou = self._exige_colaborador(alvo, periodo, "Como está FULANO este mês?")
+        if faltou:
+            return faltou
+        r = self._resumo(alvo, periodo)
+        texto = (f"{self._tratar(alvo, usuario)} {periodo.frase}:\n\n"
+                 f"- Horas trabalhadas: **{ctx.formatar_horas(r['total_horas'])}**\n"
+                 f"- Horas extras: **{ctx.formatar_horas(r['total_extra'])}**"
+                 + (f" (+{ctx.formatar_horas(r['extra_retida'])} aguardando aprovação)" if r["extra_retida"] else "") + "\n"
+                 f"- Dias com registro: **{r['dias_trabalhados']}**\n"
+                 f"- Atrasos: **{len(r['atrasos'])}** · Dias úteis sem registro: **{len(r['faltas'])}** · "
+                 f"Dias incompletos: **{len(r['incompletos'])}**")
+        linhas = [[formatar_data(d["data"]), d["total_horas"],
+                   ctx.formatar_horas(d["horas_extras"]) if d["horas_extras"] else "—"]
+                  for d in sorted(r["dias"], key=lambda d: d["data"], reverse=True) if d["batidas"]]
+        return self._resposta(texto, detalhes=linhas, colunas=["Dia", "Trabalhado", "Extra"],
+                              periodo=periodo, destaque=ctx.formatar_horas(r["total_extra"]))
+
+    def _ultimo_ponto(self, alvo, periodo, eh_gestor, usuario=None, **kwargs):
+        ctx = self.ctx
+        RegistroPonto = ctx.RegistroPonto
+        if alvo is None and eh_gestor:
+            registros = (RegistroPonto.query.order_by(RegistroPonto.data_hora.desc())
+                         .limit(self.LIMITE_LINHAS).all())
+            if not registros:
+                return self._resposta("Ainda não há nenhuma batida registrada no sistema.")
+            linhas = [[r.colaborador.nome, ctx.para_brasilia(r.data_hora).strftime("%d/%m %H:%M"),
+                       "Entrada" if (r.tipo or "") == "entrada" else "Saída"] for r in registros]
+            return self._resposta("Últimas batidas registradas:", detalhes=linhas,
+                                  colunas=["Colaborador", "Quando", "Tipo"])
+
+        faltou = self._exige_colaborador(alvo, periodo, "Qual o último ponto de FULANO?")
+        if faltou:
+            return faltou
+        ultimo = (RegistroPonto.query.filter_by(colaborador_id=alvo.id)
+                  .order_by(RegistroPonto.data_hora.desc()).first())
+        if not ultimo:
+            return self._resposta(f"{self._tratar(alvo, usuario)} ainda não tem nenhuma batida registrada.")
+        quando = ctx.para_brasilia(ultimo.data_hora)
+        tipo = "entrada" if (ultimo.tipo or "") == "entrada" else "saída"
+        local = f" em {ultimo.endereco}" if ultimo.endereco else ""
+        proximo = "saída" if tipo == "entrada" else "entrada"
+        eh_proprio = self._eh_proprio(alvo, usuario)
+        sujeito = "Sua última batida" if eh_proprio else f"A última batida de **{alvo.nome}**"
+        fecho = ("A sua próxima marcação será uma " if eh_proprio
+                 else "A próxima marcação dessa pessoa será uma ")
+        return self._resposta(
+            f"{sujeito} foi uma **{tipo}** em "
+            f"{quando.strftime('%d/%m/%Y às %H:%M:%S')}{local}. {fecho}{proximo}.",
+            periodo=periodo, destaque=quando.strftime("%d/%m %H:%M"))
+
+    def _presentes_hoje(self, periodo, **kwargs):
+        ctx = self.ctx
+        hoje = ctx.agora_brasilia().date()
+        config = ctx.obter_configuracao()
+        colaboradores = self._colaboradores(incluir_inativos=False)
+
+        presentes, ausentes = [], []
+        for c in colaboradores:
+            registros = ctx.registros_do_dia(c.id, hoje)
+            if registros:
+                primeira = ctx.para_brasilia(registros[0].data_hora)
+                ultimo_tipo = (registros[-1].tipo or "").lower()
+                presentes.append([c.nome, primeira.strftime("%H:%M"),
+                                  "trabalhando" if ultimo_tipo == "entrada" else "já saiu"])
+            else:
+                ausentes.append(c.nome)
+
+        if ctx.eh_domingo(hoje):
+            cabecalho = "Hoje é domingo — não há expectativa de comparecimento. "
+        else:
+            cabecalho = ""
+        texto = (f"{cabecalho}**{len(presentes)} de {len(colaboradores)}** colaboradores bateram ponto hoje "
+                 f"({formatar_data(hoje)}).")
+        if ausentes and not ctx.eh_domingo(hoje):
+            texto += f"\n\nAinda sem registro: {', '.join(ausentes[:10])}"
+            if len(ausentes) > 10:
+                texto += f" e mais {len(ausentes) - 10}."
+        texto += f"\n\n_Entrada padrão da empresa: {config.horario_entrada}._"
+        return self._resposta(texto, detalhes=presentes,
+                              colunas=["Colaborador", "Primeira batida", "Situação"],
+                              destaque=f"{len(presentes)}/{len(colaboradores)}")
+
+    def _pendencias(self, periodo, **kwargs):
+        ctx = self.ctx
+        ajustes = (ctx.SolicitacaoAjuste.query.filter_by(status="pendente")
+                   .order_by(ctx.SolicitacaoAjuste.criado_em.asc()).all())
+        try:
+            excepcionais = (ctx.AprovacaoJornadaExcepcional.query.filter_by(status="pendente")
+                            .order_by(ctx.AprovacaoJornadaExcepcional.criado_em.asc()).all())
+        except Exception:
+            excepcionais = []
+
+        if not ajustes and not excepcionais:
+            return self._resposta("Não há nada aguardando sua aprovação. Tudo em dia. ✅",
+                                  destaque="0 pendências")
+
+        linhas = []
+        for s in ajustes:
+            linhas.append([s.colaborador.nome, "Ajuste de ponto",
+                           f"{formatar_data(s.data_referencia)} {s.tipo} {s.horario_solicitado}"])
+        for a in excepcionais:
+            linhas.append([a.colaborador.nome, "Jornada excepcional",
+                           f"{formatar_data(a.data_referencia)} · {a.horas_total:.1f}h seguidas"])
+
+        texto = (f"Você tem **{len(ajustes)} solicitação(ões) de ajuste** e "
+                 f"**{len(excepcionais)} jornada(s) excepcional(is)** aguardando revisão. "
+                 f"Todas ficam na tela *Ajustes*.")
+        return self._resposta(texto, detalhes=linhas, colunas=["Colaborador", "Tipo", "Referência"],
+                              destaque=f"{len(ajustes) + len(excepcionais)} pendências")
+
+    def _minhas_solicitacoes(self, usuario, periodo):
+        ctx = self.ctx
+        solicitacoes = (ctx.SolicitacaoAjuste.query.filter_by(colaborador_id=usuario.id)
+                        .order_by(ctx.SolicitacaoAjuste.criado_em.desc()).limit(self.LIMITE_LINHAS).all())
+        if not solicitacoes:
+            return self._resposta("Você não tem nenhuma solicitação de ajuste registrada.",
+                                  intencao="pendencias")
+        linhas = [[formatar_data(s.data_referencia), s.tipo, s.horario_solicitado, s.status]
+                  for s in solicitacoes]
+        pendentes = sum(1 for s in solicitacoes if s.status == "pendente")
+        return self._resposta(
+            f"Você tem {len(solicitacoes)} solicitação(ões) registrada(s), sendo {pendentes} aguardando o gestor.",
+            intencao="pendencias", detalhes=linhas, colunas=["Dia", "Tipo", "Horário", "Status"])
+
+    def _ranking(self, periodo, eh_gestor, **kwargs):
+        ctx = self.ctx
+        colaboradores = self._colaboradores(incluir_inativos=False)
+        if not colaboradores:
+            return self._resposta("Nenhum colaborador cadastrado ainda.", periodo=periodo)
+
+        dados = []
+        for c in colaboradores:
+            r = self._resumo(c, periodo)
+            dados.append((c, r))
+        dados.sort(key=lambda item: -item[1]["total_extra"])
+
+        total_empresa = sum(r["total_extra"] for _, r in dados)
+        com_extra = [d for d in dados if d[1]["total_extra"] > 0]
+        linhas = [[c.nome, ctx.formatar_horas(r["total_extra"]), ctx.formatar_horas(r["total_horas"])]
+                  for c, r in dados if r["total_extra"] > 0 or r["total_horas"] > 0]
+
+        if not com_extra:
+            texto = f"Ninguém acumulou hora extra {periodo.frase}."
+        else:
+            primeiro, r1 = com_extra[0]
+            texto = (f"{periodo.frase.capitalize()}, a equipe acumulou **{ctx.formatar_horas(total_empresa)}** "
+                     f"de hora extra, distribuídas entre {len(com_extra)} colaborador(es). "
+                     f"Quem tem mais é **{primeiro.nome}**, com {ctx.formatar_horas(r1['total_extra'])}.")
+            retida = sum(r["extra_retida"] for _, r in dados)
+            if retida:
+                texto += f"\n\n⚠️ Há ainda {ctx.formatar_horas(retida)} aguardando aprovação de jornadas excepcionais."
+        return self._resposta(texto, detalhes=linhas,
+                              colunas=["Colaborador", "Hora extra", "Trabalhadas"],
+                              periodo=periodo, destaque=ctx.formatar_horas(total_empresa))
+
+    def _configuracao(self, periodo, **kwargs):
+        ctx = self.ctx
+        config = ctx.obter_configuracao()
+        duracao = (int(config.horario_saida.split(":")[0]) + int(config.horario_saida.split(":")[1]) / 60) - \
+                  (int(config.horario_entrada.split(":")[0]) + int(config.horario_entrada.split(":")[1]) / 60)
+        texto = (f"A jornada padrão configurada é **{config.horario_entrada} às {config.horario_saida}** "
+                 f"({ctx.formatar_horas(duracao)} por dia, intervalo incluído no intervalo entre batidas). "
+                 f"A meta diária é de {ctx.formatar_horas(config.meta_horas_diarias)} e o lembrete de ponto "
+                 f"é reenviado a cada {config.intervalo_lembrete_minutos} minutos.\n\n"
+                 f"Hora extra = tempo trabalhado no dia − duração padrão da jornada. "
+                 f"Domingo é exceção: o dia inteiro conta como extra.")
+        return self._resposta(texto, periodo=periodo)
+
+    def _custo_extras(self, periodo, alvo, eh_gestor, **kwargs):
+        ctx = self.ctx
+        colaboradores = [alvo] if alvo else self._colaboradores(incluir_inativos=False)
+        total = sum(self._resumo(c, periodo)["total_extra"] for c in colaboradores)
+        texto = (f"O sistema não guarda salários, então não consigo calcular o valor em reais. "
+                 f"O que posso dizer é o volume: **{ctx.formatar_horas(total)}** de hora extra em "
+                 f"{periodo.rotulo}"
+                 + (f" para {alvo.nome}." if alvo else " na equipe toda.")
+                 + "\n\nCom o valor da hora de cada colaborador em mãos, basta multiplicar por esse total "
+                   "(mais o adicional previsto em convenção).")
+        return self._resposta(texto, periodo=periodo, destaque=ctx.formatar_horas(total))
+
+    def _ajuda(self, eh_gestor, **kwargs):
+        if eh_gestor:
+            texto = ("Eu leio os dados de ponto da empresa e respondo em linguagem natural. "
+                     "Posso falar sobre horas extras, horas trabalhadas, atrasos, dias sem registro, "
+                     "dias incompletos, últimas batidas, quem está presente hoje, pendências de "
+                     "aprovação e comparações entre colaboradores.\n\n"
+                     "Você pode citar o nome do colaborador e o período livremente — entendo coisas "
+                     "como \"mês passado\", \"nos últimos 15 dias\" ou \"de 01/07 a 15/07\".")
+            sugestoes = [
+                "Quantas horas extras a Maria tem este mês?",
+                "Quem tem mais horas extras este mês?",
+                "Quem ainda não bateu ponto hoje?",
+                "Quais pendências estão esperando minha aprovação?",
+                "Quantos atrasos o João teve mês passado?",
+            ]
+        else:
+            texto = ("Eu respondo sobre o SEU ponto: horas trabalhadas, horas extras, atrasos, "
+                     "dias incompletos e o andamento das suas solicitações de ajuste. "
+                     "Dados de outros colaboradores só o gestor consulta.")
+            sugestoes = [
+                "Quantas horas extras eu tenho este mês?",
+                "Quantas horas trabalhei na semana passada?",
+                "Tenho algum dia incompleto?",
+                "Como está minha solicitação de ajuste?",
+            ]
+        return self._resposta(texto, sugestoes=sugestoes)
+
+    def _nao_entendi(self, pergunta, eh_gestor):
+        return self._resposta(
+            "Ainda não entendi essa pergunta. Tente ser mais direto sobre o que você quer saber "
+            "(horas extras, horas trabalhadas, atrasos, faltas, pendências, presença) e, se for "
+            "sobre alguém específico, cite o nome cadastrado.\n\n"
+            "_Guardei sua pergunta: quando você me ensinar a resposta certa (marcando 👍 numa "
+            "pergunta parecida), eu passo a acertar essa também._",
+            intencao="desconhecida",
+            sugestoes=(["Quantas horas extras a Maria tem este mês?",
+                        "Quem tem mais horas extras este mês?",
+                        "Quem ainda não bateu ponto hoje?"] if eh_gestor else
+                       ["Quantas horas extras eu tenho este mês?",
+                        "Quantas horas trabalhei este mês?"]),
+        )

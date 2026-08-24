@@ -12,13 +12,13 @@
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card" id="resumo-por-dia">
   <div class="card-header">
     <h2>Resumo por dia</h2>
   </div>
-  {% if resumo_diario %}
+  {% if resumo_diario.total %}
     <div class="lista-colaboradores">
-      {% for dia in resumo_diario %}
+      {% for dia in resumo_diario.items %}
         <div class="colaborador-item">
           <div class="colaborador-info">
             <span class="colaborador-nome">{{ dia.data.strftime('%d/%m/%Y') }}</span>
@@ -46,12 +46,13 @@
         </div>
       {% endfor %}
     </div>
+    {{ paginacao(resumo_diario) }}
   {% else %}
     <p class="vazio">Nenhum registro encontrado ainda.</p>
   {% endif %}
 </div>
 
-<div class="card">
+<div class="card" id="historico-detalhado">
   <div class="card-header">
     <h2>Histórico detalhado</h2>
   </div>
@@ -91,7 +92,7 @@
       </tbody>
     </table>
   </div>
-  {{ paginacao(registros, 'meus_registros') }}
+  {{ paginacao(registros) }}
 </div>
 
 <div class="card">
@@ -125,13 +126,13 @@
   </form>
 </div>
 
-{% if solicitacoes %}
-<div class="card">
+{% if solicitacoes.total %}
+<div class="card" id="minhas-solicitacoes">
   <div class="card-header">
     <h2>Minhas solicitações</h2>
   </div>
   <div class="lista-colaboradores">
-    {% for s in solicitacoes %}
+    {% for s in solicitacoes.items %}
       <div class="colaborador-item">
         <div class="colaborador-info">
           <span class="colaborador-nome">{{ s.data_referencia.strftime('%d/%m/%Y') }} — {{ 'Entrada' if s.tipo == 'entrada' else 'Saída' }} às {{ s.horario_solicitado }}</span>
@@ -150,6 +151,7 @@
       </div>
     {% endfor %}
   </div>
+  {{ paginacao(solicitacoes) }}
 </div>
 {% endif %}
 

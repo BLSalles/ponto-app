@@ -1,19 +1,70 @@
-{% macro paginacao(pag, endpoint) %}
-{% if pag.pages > 1 %}
-<div class="paginacao">
-  {% if pag.has_prev %}
-    <a href="{{ url_for(endpoint, page=pag.prev_num) }}" class="paginacao-btn">← Anterior</a>
-  {% else %}
-    <span class="paginacao-btn paginacao-desabilitado">← Anterior</span>
-  {% endif %}
+{#
+  Macro de paginação usada por todas as listas/tabelas do sistema.
 
-  <span class="paginacao-info">Página {{ pag.page }} de {{ pag.pages }} · {{ pag.total }} no total</span>
+  Recebe um objeto de paginação criado por `paginar_query` / `paginar_lista`
+  (app.py), que sempre traz:
+    .items .page .pages .total .per_page .has_prev .has_next .prev_num .next_num
+    .param   -> nome do parâmetro na URL (ex.: "p_registros"), para que duas
+                tabelas na MESMA página possam ser paginadas de forma independente
+    .ancora  -> id do bloco, para o navegador voltar já na altura da tabela
+    .numeros -> lista de páginas a exibir, com None onde entra "…"
 
-  {% if pag.has_next %}
-    <a href="{{ url_for(endpoint, page=pag.next_num) }}" class="paginacao-btn">Próxima →</a>
-  {% else %}
-    <span class="paginacao-btn paginacao-desabilitado">Próxima →</span>
-  {% endif %}
+  Antes, a macro usava sempre `page=` e montava a URL só com esse parâmetro:
+  qualquer outro filtro da tela (ex.: ?mes=2026-08) era PERDIDO ao clicar em
+  "Próxima", e duas tabelas na mesma página andavam juntas. Agora a URL é montada
+  a partir dos argumentos atuais da requisição, trocando apenas a página da tabela
+  em questão.
+#}
+
+{%- macro _url_pagina(pag, numero, endpoint=None) -%}
+  {%- set args = {} -%}
+  {%- for chave, valor in (request.view_args or {}).items() -%}
+    {%- set _ = args.update({chave: valor}) -%}
+  {%- endfor -%}
+  {%- for chave, valor in request.args.items() -%}
+    {%- set _ = args.update({chave: valor}) -%}
+  {%- endfor -%}
+  {%- set _ = args.update({pag.param: numero}) -%}
+  {{- url_for(endpoint or request.endpoint, **args) }}{% if pag.ancora %}#{{ pag.ancora }}{% endif -%}
+{%- endmacro -%}
+
+{% macro paginacao(pag, endpoint=None) %}
+{% if pag and pag.pages and pag.pages > 1 %}
+<nav class="paginacao" aria-label="Paginação">
+  <div class="paginacao-controles">
+    {% if pag.has_prev %}
+      <a href="{{ _url_pagina(pag, pag.prev_num, endpoint) }}" class="paginacao-btn" rel="prev" aria-label="Página anterior">←</a>
+    {% else %}
+      <span class="paginacao-btn paginacao-desabilitado" aria-hidden="true">←</span>
+    {% endif %}
+
+    <span class="paginacao-numeros">
+      {% for numero in pag.numeros %}
+        {% if numero is none %}
+          <span class="paginacao-reticencias">…</span>
+        {% elif numero == pag.page %}
+          <span class="paginacao-num paginacao-num-ativo" aria-current="page">{{ numero }}</span>
+        {% else %}
+          <a href="{{ _url_pagina(pag, numero, endpoint) }}" class="paginacao-num">{{ numero }}</a>
+        {% endif %}
+      {% endfor %}
+    </span>
+
+    {% if pag.has_next %}
+      <a href="{{ _url_pagina(pag, pag.next_num, endpoint) }}" class="paginacao-btn" rel="next" aria-label="Próxima página">→</a>
+    {% else %}
+      <span class="paginacao-btn paginacao-desabilitado" aria-hidden="true">→</span>
+    {% endif %}
+  </div>
+
+  <span class="paginacao-info">
+    {{ pag.primeiro_item }}–{{ pag.ultimo_item }} de {{ pag.total }}
+    · página {{ pag.page }} de {{ pag.pages }}
+  </span>
+</nav>
+{% elif pag and pag.total %}
+<div class="paginacao paginacao-simples">
+  <span class="paginacao-info">{{ pag.total }} registro{{ 's' if pag.total != 1 else '' }}</span>
 </div>
 {% endif %}
 {% endmacro %}

@@ -3,17 +3,18 @@
 {% block titulo %}Ajustes - Painel do Gestor{% endblock %}
 {% block conteudo %}
 
-{% if pendentes_excepcionais %}
-<div class="card">
+{% if pendentes_excepcionais.total %}
+<div class="card" id="jornadas-excepcionais">
   <div class="card-header">
     <h2>⚠️ Jornadas excepcionais pendentes</h2>
+    <span class="badge badge-alerta">{{ pendentes_excepcionais.total }}</span>
   </div>
   <p class="ajuste-motivo" style="margin-bottom: 1rem;">
     Sessões contínuas (entrada → saída) acima de {{ limite_horas_excepcional | int }}h. Podem ser reais
     (virada de turno) ou um esquecimento de bater o ponto — a hora extra desses dias só entra no
     total depois da sua revisão.
   </p>
-  {% for a in pendentes_excepcionais %}
+  {% for a in pendentes_excepcionais.items %}
     <div class="ajuste-item">
       <div class="ajuste-info">
         <span class="colaborador-nome">{{ a.colaborador.nome }}</span>
@@ -39,15 +40,17 @@
       </form>
     </div>
   {% endfor %}
+  {{ paginacao(pendentes_excepcionais) }}
 </div>
 {% endif %}
 
-<div class="card">
+<div class="card" id="solicitacoes-pendentes">
   <div class="card-header">
     <h2>Solicitações pendentes</h2>
+    {% if pendentes.total %}<span class="badge badge-alerta">{{ pendentes.total }}</span>{% endif %}
   </div>
-  {% if pendentes %}
-    {% for s in pendentes %}
+  {% if pendentes.total %}
+    {% for s in pendentes.items %}
       <div class="ajuste-item">
         <div class="ajuste-info">
           <span class="colaborador-nome">{{ s.colaborador.nome }}</span>
@@ -70,13 +73,14 @@
         </form>
       </div>
     {% endfor %}
+    {{ paginacao(pendentes) }}
   {% else %}
     <p class="vazio">Nenhuma solicitação pendente. 🎉</p>
   {% endif %}
 </div>
 
 {% if historico.total %}
-<div class="card">
+<div class="card" id="historico-ajustes">
   <div class="card-header">
     <h2>Histórico</h2>
   </div>
@@ -108,7 +112,7 @@
       </tbody>
     </table>
   </div>
-  {{ paginacao(historico, 'gestor_ajustes') }}
+  {{ paginacao(historico) }}
 </div>
 {% endif %}
 

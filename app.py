@@ -87,9 +87,6 @@ def injetar_contexto_navegacao():
     contexto = {"marca": obter_marca()}
     if session.get("is_gestor"):
         contexto["ajustes_pendentes_nav"] = SolicitacaoAjuste.query.filter_by(status="pendente").count()
-        # Só mostra o item "Assistente" no menu se o módulo tiver sido registrado
-        # com sucesso (ver o final deste arquivo).
-        contexto["assistente_disponivel"] = "assistente.gestor_assistente" in app.view_functions
     return contexto
 
 
@@ -284,6 +281,50 @@ def filtro_clarear(cor_hex, fator=0.85):
         return cor_hex
 
 
+class AssistenteInteracao(db.Model):
+    """Cada pergunta feita ao assistente e a resposta dada. É a base do
+    aprendizado: guarda o que foi perguntado, o que o motor entendeu e se a
+    resposta foi útil."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=True)
+    pergunta = db.Column(db.Text, nullable=False)
+    pergunta_normalizada = db.Column(db.Text, nullable=False)
+    intencao = db.Column(db.String(40), nullable=True)
+    confianca = db.Column(db.Float, default=0.0)
+    colaborador_alvo_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=True)
+    resposta = db.Column(db.Text, nullable=True)
+    util = db.Column(db.Boolean, nullable=True)  # None = ainda sem avaliação
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+
+    colaborador = db.relationship("Colaborador", foreign_keys=[colaborador_id])
+    colaborador_alvo = db.relationship("Colaborador", foreign_keys=[colaborador_alvo_id])
+
+
+class AssistentePadrao(db.Model):
+    """Padrão de pergunta aprendido com o uso: quando o gestor marca uma
+    resposta como útil, a forma como ele escreveu a pergunta passa a valer como
+    exemplo daquela intenção. Perguntas futuras parecidas caem na mesma resposta
+    mesmo sem bater nas regras fixas."""
+    id = db.Column(db.Integer, primary_key=True)
+    padrao = db.Column(db.Text, nullable=False)
+    intencao = db.Column(db.String(40), nullable=False)
+    peso = db.Column(db.Float, default=1.0)
+    usos = db.Column(db.Integer, default=1)
+    atualizado_em = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AssistenteApelido(db.Model):
+    """Apelido/forma de escrever aprendida para um colaborador ('jô' -> Joana
+    Ribeiro), ensinada quando o gestor corrige o assistente."""
+    id = db.Column(db.Integer, primary_key=True)
+    apelido = db.Column(db.String(60), nullable=False, unique=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    acertos = db.Column(db.Integer, default=1)
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+
+    colaborador = db.relationship("Colaborador", backref="apelidos_assistente")
+
+
 class PushSubscription(db.Model):
     """Inscrição de notificação push (Web Push) de um colaborador em um dispositivo/navegador."""
     id = db.Column(db.Integer, primary_key=True)
@@ -464,17 +505,30 @@ def eh_domingo(data):
     return data.weekday() == 6  # 0=segunda ... 6=domingo
 
 
-def contar_registros_hoje(colaborador_id):
-    """Conta quantas batidas de ponto o colaborador já fez hoje (horário de Brasília)."""
-    hoje = agora_brasilia().date()
-    registros_recentes = (
+def registros_do_dia(colaborador_id, dia=None):
+    """Devolve TODAS as batidas do colaborador em um dia (horário de Brasília),
+    em ordem cronológica.
+
+    Antes isso era feito olhando só as 10 últimas batidas do colaborador: quem
+    batesse mais de 10 pontos no dia (ou tivesse batidas de madrugada no meio)
+    tinha o dia contado errado. Agora a janela é buscada por data no banco
+    (com folga de fuso), sem limite artificial de linhas."""
+    dia = dia or agora_brasilia().date()
+    inicio_utc = datetime.combine(dia, datetime.min.time()) - timedelta(hours=6)
+    fim_utc = datetime.combine(dia, datetime.max.time()) + timedelta(hours=6)
+    candidatos = (
         RegistroPonto.query
         .filter_by(colaborador_id=colaborador_id)
-        .order_by(RegistroPonto.data_hora.desc())
-        .limit(10)
+        .filter(RegistroPonto.data_hora >= inicio_utc, RegistroPonto.data_hora <= fim_utc)
+        .order_by(RegistroPonto.data_hora.asc())
         .all()
     )
-    return sum(1 for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje)
+    return [r for r in candidatos if para_brasilia(r.data_hora).date() == dia]
+
+
+def contar_registros_hoje(colaborador_id):
+    """Conta quantas batidas de ponto o colaborador já fez hoje (horário de Brasília)."""
+    return len(registros_do_dia(colaborador_id))
 
 
 def determinar_proximo_tipo(colaborador_id):
@@ -682,6 +736,124 @@ def formatar_horas(horas_decimal):
     if h:
         return f"{h}h"
     return f"{m}min"
+
+
+# ---------------------------------------------------------------------------
+# Paginação (usada por TODAS as listas e tabelas do sistema)
+#
+# Regra do sistema: nenhuma tela mostra mais de ITENS_POR_PAGINA registros de
+# uma vez — passou disso, pagina.
+#
+# Antes, cada rota fazia seu próprio `paginate(page=request.args.get("page"))`
+# com um limite diferente (20, 25, 30) e algumas listas nem paginavam (vinham
+# com .limit() fixo, escondendo silenciosamente o restante). Além disso, como
+# todas usavam o MESMO parâmetro "page", duas tabelas na mesma tela (ex.: a de
+# ajustes) andavam juntas, e clicar em "Próxima" apagava os outros filtros da
+# URL (ex.: ?mes=2026-08).
+#
+# Agora existe um só ponto de verdade: `paginar_query` (para consultas ao banco)
+# e `paginar_lista` (para listas já calculadas em memória, como o resumo diário),
+# ambas devolvendo o mesmo objeto `Paginacao`, com um parâmetro de URL próprio
+# por tabela.
+# ---------------------------------------------------------------------------
+ITENS_POR_PAGINA = 10
+
+
+class Paginacao:
+    """Resultado paginado, com a mesma interface para consultas do banco e para
+    listas em memória (o template não precisa saber a diferença)."""
+
+    def __init__(self, itens, pagina, por_pagina, total, param="page", ancora=None):
+        self.items = itens
+        self.per_page = por_pagina
+        self.total = total
+        self.param = param
+        self.ancora = ancora
+        self.pages = (total + por_pagina - 1) // por_pagina if total else 0
+        # Nunca deixa a página pedida ficar fora do intervalo válido: pedir
+        # ?p=999 (ou ?p=-3, ou ?p=abc) devolve a última/primeira página com
+        # conteúdo, em vez de uma tabela vazia sem explicação.
+        self.page = min(max(1, pagina), self.pages) if self.pages else 1
+
+    @property
+    def has_prev(self):
+        return self.page > 1
+
+    @property
+    def has_next(self):
+        return self.page < self.pages
+
+    @property
+    def prev_num(self):
+        return self.page - 1 if self.has_prev else None
+
+    @property
+    def next_num(self):
+        return self.page + 1 if self.has_next else None
+
+    @property
+    def primeiro_item(self):
+        return 0 if not self.total else (self.page - 1) * self.per_page + 1
+
+    @property
+    def ultimo_item(self):
+        return min(self.page * self.per_page, self.total)
+
+    @property
+    def numeros(self):
+        """Páginas a exibir na barra: sempre a primeira, a última, e as vizinhas
+        da atual. `None` marca onde entra o '…'."""
+        if not self.pages:
+            return []
+        visiveis = set()
+        for n in (1, 2, self.pages - 1, self.pages):
+            if 1 <= n <= self.pages:
+                visiveis.add(n)
+        for n in range(self.page - 2, self.page + 3):
+            if 1 <= n <= self.pages:
+                visiveis.add(n)
+
+        resultado = []
+        anterior = 0
+        for n in sorted(visiveis):
+            if anterior and n - anterior > 1:
+                resultado.append(None)
+            resultado.append(n)
+            anterior = n
+        return resultado
+
+
+def _pagina_pedida(param):
+    """Lê o número da página da URL de forma tolerante (valor ausente, vazio,
+    negativo ou não numérico vira 1, sem estourar 400/500)."""
+    try:
+        return max(1, int(request.args.get(param, 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def paginar_query(query, param="page", ancora=None, por_pagina=None):
+    """Pagina uma query do SQLAlchemy contando o total no banco (não carrega
+    tudo na memória)."""
+    por_pagina = por_pagina or ITENS_POR_PAGINA
+    total = query.order_by(None).count()
+    pagina = _pagina_pedida(param)
+    paginacao = Paginacao([], pagina, por_pagina, total, param=param, ancora=ancora)
+    if total:
+        paginacao.items = query.limit(por_pagina).offset((paginacao.page - 1) * por_pagina).all()
+    return paginacao
+
+
+def paginar_lista(lista, param="page", ancora=None, por_pagina=None):
+    """Pagina uma lista já pronta em memória (ex.: resumo diário calculado a
+    partir das batidas)."""
+    por_pagina = por_pagina or ITENS_POR_PAGINA
+    lista = list(lista or [])
+    pagina = _pagina_pedida(param)
+    paginacao = Paginacao([], pagina, por_pagina, len(lista), param=param, ancora=ancora)
+    inicio = (paginacao.page - 1) * por_pagina
+    paginacao.items = lista[inicio:inicio + por_pagina]
+    return paginacao
 
 
 # ---------------------------------------------------------------------------
@@ -917,19 +1089,23 @@ def ponto():
     if session.get("is_gestor"):
         return redirect(url_for("gestor_consulta"))
     config = obter_configuracao()
-    registros_hoje_count = contar_registros_hoje(session["user_id"])
 
     hoje = agora_brasilia().date()
+    registros_hoje_lista = registros_do_dia(session["user_id"], hoje)
+    registros_hoje_count = len(registros_hoje_lista)
+
+    # Para o resumo do dia, precisamos também da última batida ANTES de hoje: uma
+    # jornada que virou a noite só fecha corretamente se a entrada da véspera
+    # entrar no cálculo.
     registros_recentes = (
         RegistroPonto.query
         .filter_by(colaborador_id=session["user_id"])
         .order_by(RegistroPonto.data_hora.desc())
-        .limit(20)
+        .limit(max(20, registros_hoje_count + 10))
         .all()
     )
     resumo_lista = montar_resumo_diario(registros_recentes)
     resumo_hoje = next((r for r in resumo_lista if r["data"] == hoje), None)
-    registros_hoje_lista = [r for r in registros_recentes if para_brasilia(r.data_hora).date() == hoje]
 
     hora_atual = agora_brasilia().hour
     if hora_atual < 12:
@@ -1026,12 +1202,15 @@ def registrar_ponto():
 def meus_registros():
     user = Colaborador.query.get(session["user_id"])
 
-    # Janela usada só para montar o resumo por dia (não precisa paginar, é agregado).
+    # Janela usada para montar o resumo por dia. Antes era "as 200 últimas batidas",
+    # um corte arbitrário que escondia dias inteiros de quem bate muito ponto; agora
+    # é uma janela por DATA (últimos 6 meses), e o resumo resultante é paginado.
+    limite_resumo_utc = datetime.utcnow() - timedelta(days=185)
     registros_para_resumo = (
         RegistroPonto.query
         .filter_by(colaborador_id=user.id)
+        .filter(RegistroPonto.data_hora >= limite_resumo_utc)
         .order_by(RegistroPonto.data_hora.desc())
-        .limit(200)
         .all()
     )
     resumo_diario = montar_resumo_diario(registros_para_resumo)
@@ -1048,27 +1227,31 @@ def meus_registros():
         if dia["data"].year == hoje.year and dia["data"].month == hoje.month:
             total_extra_mes += dia["horas_extras"]
 
-    # Histórico detalhado (tabela) é paginado separadamente, sem limite fixo.
-    pagina = request.args.get("page", 1, type=int)
-    registros = (
+    # Cada bloco da tela tem seu PRÓPRIO parâmetro de página, para que navegar no
+    # histórico não mexa no resumo por dia nem nas solicitações (antes os três
+    # dividiriam o mesmo "page").
+    resumo_paginado = paginar_lista(resumo_diario, param="p_resumo", ancora="resumo-por-dia")
+
+    registros = paginar_query(
         RegistroPonto.query
         .filter_by(colaborador_id=user.id)
-        .order_by(RegistroPonto.data_hora.desc())
-        .paginate(page=pagina, per_page=20, error_out=False)
+        .order_by(RegistroPonto.data_hora.desc()),
+        param="p_registros",
+        ancora="historico-detalhado",
     )
 
-    solicitacoes = (
+    solicitacoes = paginar_query(
         SolicitacaoAjuste.query
         .filter_by(colaborador_id=user.id)
-        .order_by(SolicitacaoAjuste.criado_em.desc())
-        .limit(30)
-        .all()
+        .order_by(SolicitacaoAjuste.criado_em.desc()),
+        param="p_solicitacoes",
+        ancora="minhas-solicitacoes",
     )
 
     return render_template(
         "meus_registros.html",
         registros=registros,
-        resumo_diario=resumo_diario,
+        resumo_diario=resumo_paginado,
         solicitacoes=solicitacoes,
         hoje=hoje,
         total_extra_mes=round(total_extra_mes, 2),
@@ -1121,10 +1304,10 @@ def gestor_consulta():
     from collections import defaultdict
 
     config = obter_configuracao()
-    pagina = request.args.get("page", 1, type=int)
-    registros_paginados = (
-        RegistroPonto.query.order_by(RegistroPonto.data_hora.desc())
-        .paginate(page=pagina, per_page=25, error_out=False)
+    registros_paginados = paginar_query(
+        RegistroPonto.query.order_by(RegistroPonto.data_hora.desc()),
+        param="p_registros",
+        ancora="registros-ponto",
     )
     colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
     total_colaboradores = len(colaboradores)
@@ -1176,7 +1359,10 @@ def gestor_consulta():
     return render_template(
         "gestor_consulta.html",
         registros=registros_paginados,
-        colaboradores=colaboradores,
+        colaboradores=paginar_lista(colaboradores, param="p_colaboradores", ancora="lista-colaboradores"),
+        ausentes_paginados=paginar_lista(
+            colaboradores_sem_registro_hoje, param="p_ausentes", ancora="sem-ponto-hoje"
+        ),
         registros_hoje=len(registros_hoje_todos),
         total_colaboradores=total_colaboradores,
         sem_cadastro_facial=sem_cadastro_facial,
@@ -1194,7 +1380,11 @@ def gestor_consulta():
 @app.route("/gestor/cadastro", methods=["GET"])
 @gestor_required
 def gestor_cadastro():
-    colaboradores = Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome).all()
+    colaboradores = paginar_query(
+        Colaborador.query.filter_by(is_gestor=False).order_by(Colaborador.nome),
+        param="p_colaboradores",
+        ancora="colaboradores-cadastrados",
+    )
     return render_template("gestor_cadastro.html", colaboradores=colaboradores)
 
 
@@ -1610,10 +1800,14 @@ def gestor_horas_extras():
 
     resumo_colaboradores, primeiro_dia, config = _calcular_relatorio_horas_extras(ano, mes)
     total_extra_empresa = round(sum(r["total_extra"] for r in resumo_colaboradores), 2)
+    colaboradores_com_extra = sum(1 for r in resumo_colaboradores if r["total_extra"] > 0)
 
     return render_template(
         "gestor_horas_extras.html",
-        resumo_colaboradores=resumo_colaboradores,
+        resumo_colaboradores=paginar_lista(
+            resumo_colaboradores, param="p_colaboradores", ancora="por-colaborador"
+        ),
+        colaboradores_com_extra=colaboradores_com_extra,
         mes_selecionado=f"{ano:04d}-{mes:02d}",
         nome_mes=primeiro_dia.strftime("%B de %Y"),
         total_extra_empresa=total_extra_empresa,
@@ -1671,25 +1865,31 @@ def _listar_pendentes_excepcionais():
 @app.route("/gestor/ajustes", methods=["GET"])
 @gestor_required
 def gestor_ajustes():
-    pendentes = (
+    # Três blocos independentes na mesma tela -> três parâmetros de página
+    # distintos (antes, o único "page" fazia o histórico "pular" junto com
+    # qualquer outra navegação).
+    pendentes = paginar_query(
         SolicitacaoAjuste.query
         .filter_by(status="pendente")
-        .order_by(SolicitacaoAjuste.criado_em.asc())
-        .all()
+        .order_by(SolicitacaoAjuste.criado_em.asc()),
+        param="p_pendentes",
+        ancora="solicitacoes-pendentes",
     )
-    pagina = request.args.get("page", 1, type=int)
-    historico = (
+    historico = paginar_query(
         SolicitacaoAjuste.query
         .filter(SolicitacaoAjuste.status != "pendente")
-        .order_by(SolicitacaoAjuste.respondido_em.desc())
-        .paginate(page=pagina, per_page=20, error_out=False)
+        .order_by(SolicitacaoAjuste.respondido_em.desc()),
+        param="p_historico",
+        ancora="historico-ajustes",
     )
 
     # Jornadas excepcionais (sessão contínua > LIMITE_HORAS_EXCEPCIONAL) aguardando revisão —
     # ver comentário em aplicar_status_excepcional(). Ficam nesta mesma tela de ajustes porque,
     # do ponto de vista do gestor, é o mesmo tipo de decisão: revisar uma pendência de ponto.
     # Protegido contra a tabela ainda não existir no banco (ver _listar_pendentes_excepcionais).
-    pendentes_excepcionais = _listar_pendentes_excepcionais()
+    pendentes_excepcionais = paginar_lista(
+        _listar_pendentes_excepcionais(), param="p_excepcionais", ancora="jornadas-excepcionais"
+    )
 
     return render_template(
         "gestor_ajustes.html",
@@ -1808,6 +2008,227 @@ def recusar_jornada_excepcional(aprovacao_id):
 
 
 # ---------------------------------------------------------------------------
+# Rotas - Assistente inteligente
+#
+# O motor fica em assistente.py e não conhece o app: recebe aqui, por injeção,
+# os modelos e as funções de cálculo que já existem (mesma regra de hora extra,
+# mesmo pareamento entrada/saída, mesmo fuso). Assim o assistente nunca responde
+# um número diferente do que as telas mostram.
+# ---------------------------------------------------------------------------
+import assistente as motor_assistente
+
+
+def _contexto_assistente():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        Colaborador=Colaborador,
+        RegistroPonto=RegistroPonto,
+        SolicitacaoAjuste=SolicitacaoAjuste,
+        AprovacaoJornadaExcepcional=AprovacaoJornadaExcepcional,
+        AssistenteApelido=AssistenteApelido,
+        AssistentePadrao=AssistentePadrao,
+        obter_configuracao=obter_configuracao,
+        montar_resumo_diario=montar_resumo_diario,
+        calcular_horas_extras_dia=calcular_horas_extras_dia,
+        registros_do_dia=registros_do_dia,
+        para_brasilia=para_brasilia,
+        agora_brasilia=agora_brasilia,
+        eh_domingo=eh_domingo,
+        formatar_horas=formatar_horas,
+    )
+
+
+def obter_assistente():
+    return motor_assistente.Assistente(_contexto_assistente())
+
+
+def _sugestoes_iniciais(usuario):
+    """Sugestões da tela inicial do chat: começa com exemplos e, conforme a
+    empresa usa o assistente, dá lugar às perguntas que mais deram certo
+    (aprendizado de uso real, não lista fixa)."""
+    if usuario.is_gestor:
+        padrao = [
+            "Quantas horas extras a equipe tem este mês?",
+            "Quem ainda não bateu ponto hoje?",
+            "Quais pendências estão esperando minha aprovação?",
+            "Quem tem mais horas extras este mês?",
+        ]
+    else:
+        padrao = [
+            "Quantas horas extras eu tenho este mês?",
+            "Quantas horas trabalhei este mês?",
+            "Tenho algum dia incompleto?",
+            "Como está minha solicitação de ajuste?",
+        ]
+    try:
+        aprovadas = (
+            AssistenteInteracao.query
+            .filter_by(util=True)
+            .order_by(AssistenteInteracao.criado_em.desc())
+            .limit(30)
+            .all()
+        )
+        vistas, sugeridas = set(), []
+        for i in aprovadas:
+            chave = i.pergunta_normalizada
+            if chave in vistas:
+                continue
+            vistas.add(chave)
+            sugeridas.append(i.pergunta)
+            if len(sugeridas) >= 4:
+                break
+        if sugeridas:
+            return sugeridas + padrao[: max(0, 4 - len(sugeridas))]
+    except Exception as ex:
+        print(f"[assistente] não foi possível montar sugestões aprendidas: {ex}")
+    return padrao
+
+
+@app.route("/assistente", methods=["GET"])
+@login_required
+def assistente_chat():
+    usuario = Colaborador.query.get(session["user_id"])
+    return render_template(
+        "assistente.html",
+        sugestoes=_sugestoes_iniciais(usuario),
+        eh_gestor=bool(usuario.is_gestor),
+    )
+
+
+@app.route("/api/assistente/perguntar", methods=["POST"])
+@login_required
+def assistente_perguntar():
+    usuario = Colaborador.query.get(session["user_id"])
+    dados = request.get_json(silent=True) or {}
+    pergunta = (dados.get("pergunta") or "").strip()[:500]
+    colaborador_id = dados.get("colaborador_id")
+
+    if not pergunta:
+        return jsonify({"ok": False, "mensagem": "Escreva uma pergunta."}), 400
+
+    forcado = None
+    if colaborador_id and usuario.is_gestor:
+        forcado = Colaborador.query.get(colaborador_id)
+
+    resultado = obter_assistente().responder(pergunta, usuario, colaborador_forcado=forcado)
+
+    # Registra a interação (base do aprendizado). Uma falha aqui não pode
+    # impedir a resposta de chegar ao usuário.
+    interacao_id = None
+    try:
+        interacao = AssistenteInteracao(
+            colaborador_id=usuario.id,
+            pergunta=pergunta,
+            pergunta_normalizada=motor_assistente.normalizar(pergunta),
+            intencao=resultado.get("intencao"),
+            confianca=resultado.get("confianca") or 0.0,
+            colaborador_alvo_id=forcado.id if forcado else None,
+            resposta=(resultado.get("resposta") or "")[:4000],
+        )
+        db.session.add(interacao)
+        db.session.commit()
+        interacao_id = interacao.id
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[assistente] falha ao registrar interação: {ex}")
+
+    resultado["interacao_id"] = interacao_id
+    resultado["ok"] = True
+    return jsonify(resultado)
+
+
+@app.route("/api/assistente/feedback", methods=["POST"])
+@login_required
+def assistente_feedback():
+    """👍/👎 numa resposta. É assim que o assistente aprende a entender o jeito
+    que ESTA empresa escreve: a pergunta aprovada vira exemplo da intenção
+    detectada; a reprovada perde peso e deixa de ser usada como referência."""
+    dados = request.get_json(silent=True) or {}
+    interacao_id = dados.get("interacao_id")
+    util = bool(dados.get("util"))
+
+    interacao = AssistenteInteracao.query.get(interacao_id) if interacao_id else None
+    if interacao is None:
+        return jsonify({"ok": False, "mensagem": "Interação não encontrada."}), 404
+    if interacao.colaborador_id != session["user_id"]:
+        return jsonify({"ok": False, "mensagem": "Sem permissão."}), 403
+
+    interacao.util = util
+
+    intencao = interacao.intencao
+    if intencao and intencao not in ("desconhecida", "erro", "vazia", "ambiguo", "sem_colaborador"):
+        padrao = AssistentePadrao.query.filter_by(
+            padrao=interacao.pergunta_normalizada, intencao=intencao
+        ).first()
+        if padrao is None:
+            padrao = AssistentePadrao(
+                padrao=interacao.pergunta_normalizada, intencao=intencao,
+                peso=1.0 if util else 0.0, usos=1,
+            )
+            db.session.add(padrao)
+        else:
+            padrao.peso = max(0.0, min(5.0, (padrao.peso or 0) + (0.5 if util else -1.0)))
+            padrao.usos = (padrao.usos or 0) + 1
+            padrao.atualizado_em = datetime.utcnow()
+
+    try:
+        db.session.commit()
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[assistente] falha ao salvar feedback: {ex}")
+        return jsonify({"ok": False, "mensagem": "Não foi possível salvar o feedback."}), 500
+
+    return jsonify({
+        "ok": True,
+        "mensagem": "Obrigado! Vou usar isso para melhorar." if util
+                    else "Anotado — vou evitar responder assim de novo.",
+    })
+
+
+@app.route("/api/assistente/ensinar", methods=["POST"])
+@gestor_required
+def assistente_ensinar():
+    """O gestor diz de quem era a pergunta que o assistente não identificou.
+    Os termos usados por ele viram apelidos daquele colaborador, e a pergunta é
+    respondida na hora, já corrigida."""
+    dados = request.get_json(silent=True) or {}
+    interacao_id = dados.get("interacao_id")
+    colaborador_id = dados.get("colaborador_id")
+
+    colaborador = Colaborador.query.get(colaborador_id) if colaborador_id else None
+    interacao = AssistenteInteracao.query.get(interacao_id) if interacao_id else None
+    if colaborador is None or interacao is None:
+        return jsonify({"ok": False, "mensagem": "Dados incompletos."}), 400
+
+    aprendidos = []
+    for termo in motor_assistente.termos_para_apelido(interacao.pergunta, colaborador.nome):
+        existente = AssistenteApelido.query.filter_by(apelido=termo).first()
+        if existente and existente.colaborador_id != colaborador.id:
+            continue  # apelido já pertence a outra pessoa — não sobrescreve
+        if existente:
+            existente.acertos = (existente.acertos or 0) + 1
+        else:
+            db.session.add(AssistenteApelido(apelido=termo, colaborador_id=colaborador.id))
+            aprendidos.append(termo)
+
+    interacao.colaborador_alvo_id = colaborador.id
+    try:
+        db.session.commit()
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[assistente] falha ao aprender apelido: {ex}")
+
+    usuario = Colaborador.query.get(session["user_id"])
+    resultado = obter_assistente().responder(
+        interacao.pergunta, usuario, colaborador_forcado=colaborador
+    )
+    resultado["ok"] = True
+    resultado["interacao_id"] = interacao_id
+    resultado["aprendido"] = aprendidos
+    return jsonify(resultado)
+
+
+# ---------------------------------------------------------------------------
 # Inicialização / seed do primeiro gestor
 # ---------------------------------------------------------------------------
 @app.cli.command("init-db")
@@ -1914,28 +2335,6 @@ elif not PUSH_HABILITADO:
         "[push] VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY não configuradas — lembretes por "
         "notificação push desativados. Rode 'flask generate-vapid-keys' para gerar as chaves."
     )
-
-
-# ---------------------------------------------------------------------------
-# Assistente do gestor (perguntas por voz ou texto sobre os dados do ponto).
-#
-# Registrado aqui no fim de propósito: o módulo `assistente` recebe este próprio
-# módulo como contexto e reaproveita os modelos e as funções de cálculo definidos
-# acima — assim o número que o assistente responde é exatamente o mesmo que
-# aparece nas telas — sem criar import circular.
-#
-# Precisa da variável de ambiente ANTHROPIC_API_KEY. Sem ela o app continua
-# funcionando normalmente; só a página do assistente avisa que está desligada.
-# ---------------------------------------------------------------------------
-try:
-    import sys
-    from assistente import init_assistente
-
-    init_assistente(app, sys.modules[__name__])
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("[assistente] ANTHROPIC_API_KEY não configurada — assistente do gestor desativado.")
-except Exception as _ex_assistente:  # nunca derruba o app por causa do assistente
-    print(f"[assistente] não foi possível registrar o assistente: {_ex_assistente}")
 
 
 if __name__ == "__main__":

@@ -11,4 +11,3 @@ tzdata
 requests==2.32.3
 pywebpush==2.3.0
 APScheduler==3.11.3
-anthropic>=1.0.0,<2.0.0
