@@ -2229,6 +2229,43 @@ def assistente_ensinar():
 
 
 # ---------------------------------------------------------------------------
+# API externa (REST) para integração com outros sistemas (ex.: Lecom)
+#
+# Mesma ideia do assistente: o módulo api_externa.py não conhece o app, recebe
+# os modelos e helpers por injeção. Assim a API devolve exatamente os mesmos
+# números e o mesmo pareamento entrada/saída que as telas mostram.
+#
+# Autenticação por token na variável de ambiente API_TOKENS (ou API_TOKEN).
+# Sem ela configurada, a API responde 503 e não expõe dado nenhum.
+# ---------------------------------------------------------------------------
+import api_externa
+
+
+def _contexto_api():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        Colaborador=Colaborador,
+        RegistroPonto=RegistroPonto,
+        para_brasilia=para_brasilia,
+        agora_brasilia=agora_brasilia,
+    )
+
+
+app.register_blueprint(api_externa.criar_blueprint_api(_contexto_api()))
+
+
+@app.cli.command("gerar-token-api")
+def gerar_token_api():
+    """Gera um token aleatório para a API externa. Rodar com: flask gerar-token-api
+
+    Copie o valor impresso para a variável de ambiente API_TOKENS do servidor
+    (no Render: Environment -> Add Environment Variable) e entregue o mesmo
+    valor para quem vai consumir a API."""
+    import secrets
+    print(secrets.token_urlsafe(32))
+
+
+# ---------------------------------------------------------------------------
 # Inicialização / seed do primeiro gestor
 # ---------------------------------------------------------------------------
 @app.cli.command("init-db")

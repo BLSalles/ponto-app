@@ -127,3 +127,118 @@ dias", "de 01/07 a 15/07", "2026-07").
 
 As três tabelas novas são criadas automaticamente no start (`db.create_all()`),
 sem migração manual.
+
+## API externa (integração com o Lecom e outros sistemas)
+
+Endpoints REST somente-leitura para outro sistema puxar os dados de ponto e
+preencher a grid dele: **nome, data, hora de entrada, hora de saída e endereço**.
+
+### 1. Ligar a API
+
+A API só funciona com token configurado. Sem token no ambiente ela responde
+`503` e não expõe nada.
+
+```bash
+# gera um token aleatório
+flask gerar-token-api
+```
+
+Cole o valor gerado na variável de ambiente do servidor (no Render:
+*Environment → Add Environment Variable*):
+
+```
+API_TOKENS=<token-gerado>
+```
+
+Para dar um token diferente para cada sistema que consome (e poder revogar um
+sem derrubar o outro), separe por vírgula:
+
+```
+API_TOKENS=token-do-lecom,token-do-rh
+```
+
+### 2. Autenticação
+
+Todo request precisa de um destes cabeçalhos:
+
+```
+X-API-Key: <token>
+Authorization: Bearer <token>
+```
+
+Respostas de erro: `401` sem token, `403` token inválido, `503` API desligada.
+
+### 3. Endpoints
+
+| Endpoint | O que devolve |
+|---|---|
+| `GET /api/v1/ping` | Teste de credencial e conectividade |
+| `GET /api/v1/colaboradores` | Lista de colaboradores (id, nome, e-mail) |
+| `GET /api/v1/jornadas` | **Uma linha por jornada (entrada + saída) — é a da grid** |
+| `GET /api/v1/batidas` | Uma linha por marcação, sem pareamento |
+
+Filtros de `/jornadas` e `/batidas` (todos opcionais):
+
+| Parâmetro | Valor |
+|---|---|
+| `inicio`, `fim` | `AAAA-MM-DD` ou `DD/MM/AAAA` (padrão: últimos 30 dias) |
+| `colaborador_id` | id numérico |
+| `email` | e-mail exato |
+| `nome` | trecho do nome (busca parcial) |
+| `pagina`, `por_pagina` | paginação (padrão 200 por página, máximo 1000) |
+| `formato` | `json` (padrão) ou `csv` |
+
+### 4. Exemplo
+
+```bash
+curl -H "X-API-Key: SEU_TOKEN" \
+  "https://SEU-APP.onrender.com/api/v1/jornadas?inicio=01/08/2026&fim=31/08/2026"
+```
+
+```json
+{
+  "inicio": "2026-08-01",
+  "fim": "2026-08-31",
+  "fuso": "America/Sao_Paulo",
+  "pagina": 1, "por_pagina": 200, "paginas": 1, "total": 2,
+  "dados": [
+    {
+      "colaborador_id": 2,
+      "nome": "Ana Souza",
+      "email": "ana@empresa.com",
+      "data": "2026-08-10",
+      "data_br": "10/08/2026",
+      "hora_entrada": "08:02:00",
+      "hora_saida": "17:58:00",
+      "data_hora_entrada": "2026-08-10T08:02:00-03:00",
+      "data_hora_saida": "2026-08-10T17:58:00-03:00",
+      "endereco_entrada": "Rua A, 100 - Centro, São Paulo",
+      "endereco_saida": "Rua A, 100 - Centro, São Paulo",
+      "latitude_entrada": -23.55, "longitude_entrada": -46.63,
+      "latitude_saida": -23.55, "longitude_saida": -46.63,
+      "total_horas": "09:56",
+      "total_horas_decimal": 9.93,
+      "completa": true,
+      "registro_entrada_id": 1,
+      "registro_saida_id": 2
+    }
+  ]
+}
+```
+
+### 5. Detalhes que importam na integração
+
+- **Fuso**: todos os horários já vêm no horário de Brasília. Os campos
+  `data_hora_*` são ISO 8601 com o deslocamento explícito (`-03:00`).
+- **Jornada que vira a noite**: fica no dia em que a **entrada** aconteceu —
+  mesma convenção das telas do sistema. Entrou 11/08 às 22h e saiu 12/08 às 6h?
+  A linha é do dia 11/08, com `data_hora_saida` no dia 12.
+- **Jornada incompleta** (bateu entrada e ainda não bateu saída, ou esqueceu):
+  `hora_saida: null` e `completa: false`. Vale tratar isso na grid.
+- **Endereço**: vem da geocodificação reversa da coordenada da batida. Pode ser
+  `null` em registros antigos ou se o serviço de mapas falhou na hora — o
+  gestor pode preencher depois em *Consulta → Preencher endereços*.
+- **Paginação**: quando `paginas > 1`, repita a chamada incrementando `pagina`
+  até juntar o `total`.
+- **CSV**: `&formato=csv` devolve o mesmo recorte separado por `;` e com BOM,
+  já pronto para abrir no Excel com acentuação correta.
