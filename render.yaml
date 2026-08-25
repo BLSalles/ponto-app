@@ -10,6 +10,11 @@ services:
         value: gestor@empresa.com
       - key: GESTOR_SENHA
         sync: false
+      # Token(s) da API externa (/api/v1/...). Defina o valor no painel do Render.
+      # Vários tokens separados por vírgula = um por sistema que consome, dá pra
+      # revogar um sem derrubar os outros. Sem essa variável a API fica desligada.
+      - key: API_TOKENS
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: ponto-db
