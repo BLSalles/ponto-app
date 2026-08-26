@@ -30,8 +30,13 @@ com foto pelo Painel do Gestor.
    Postgres gratuito automaticamente).
 3. Nas variáveis de ambiente, defina `GESTOR_SENHA` (o `render.yaml` pede
    isso manualmente por segurança).
-4. Aguarde o build (a primeira vez demora mais, pois compila o `dlib`).
-5. Acesse a URL gerada pelo Render, faça login como gestor e cadastre os
+4. (Opcional) Defina `LOCATIONIQ_API_KEY` para a geocodificação dos endereços. Sem
+   ela o app usa os servidores públicos do OpenStreetMap, que no IP compartilhado do
+   Render costumam responder `429 Too many requests` — o ponto é salvo do mesmo jeito
+   (com latitude/longitude), mas o endereço pode faltar até você clicar em
+   **Preencher endereços faltando** no painel do gestor.
+5. Aguarde o build (a primeira vez demora mais, pois compila o `dlib`).
+6. Acesse a URL gerada pelo Render, faça login como gestor e cadastre os
    colaboradores.
 
 ### Por que Docker?

@@ -705,6 +705,10 @@ button:disabled { background: var(--cor-pendente); cursor: not-allowed; }
 .badge-ok { background: var(--cor-sucesso-fundo); color: #166534; }
 .badge-alerta { background: var(--cor-alerta-fundo); color: #92400e; }
 .badge-erro { background: var(--cor-erro-fundo); color: #991b1b; }
+/* Entrada x saída na tabela de registros: cores distintas para bater o olho e saber
+   qual marcação é qual sem ler o texto. */
+.badge-entrada { background: var(--cor-sucesso-fundo); color: #166534; }
+.badge-saida { background: var(--cor-primaria-clara); color: var(--cor-primaria-escura); }
 
 /* ---------------------------------------------------------------------- */
 /* Cards de aviso / sucesso                                                */

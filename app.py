@@ -4,6 +4,7 @@ import csv
 import base64
 import json
 import time
+import threading
 import numpy as np
 import requests
 from datetime import datetime, timedelta, date
@@ -434,57 +435,244 @@ def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
     return encodings[0], None
 
 
-def obter_endereco(latitude, longitude, tentativas=2):
-    """Converte latitude/longitude em um endereço legível via geocodificação reversa (Nominatim/OpenStreetMap).
-    Retorna None se as coordenadas não vierem ou se todas as tentativas falharem (sem quebrar o
-    registro do ponto) — mas SEMPRE imprime o motivo da falha no log, para dar pra diagnosticar pelo
-    Render.
+# ---------------------------------------------------------------------------
+# Geocodificação reversa (coordenadas -> endereço legível)
+# ---------------------------------------------------------------------------
+# O Nominatim público limita 1 requisição/segundo POR IP e devolve 429 ("Too many
+# requests") para o IP inteiro. Em hospedagem compartilhada (Render) esse IP é dividido
+# com outros apps, então o 429 aparece mesmo quando NÓS mandamos pouca coisa. Defesas:
+#   1) cache: a mesma coordenada (o pátio da empresa) é resolvida uma única vez;
+#   2) throttle global + backoff: no máximo 1 chamada/segundo saindo daqui por provedor;
+#   3) provedores alternativos: se o Nominatim recusar, tenta Photon e BigDataCloud;
+#   4) cache negativo curto: uma coordenada que acabou de falhar não é remartelada.
+GEOCODE_INTERVALO_MINIMO = 1.2   # segundos entre duas chamadas ao mesmo provedor
+GEOCODE_TTL_FALHA = 300          # segundos ignorando uma coordenada que acabou de falhar
+GEOCODE_TTL_BLOQUEIO = 900       # segundos pulando um provedor que respondeu 429/503
+GEOCODE_CACHE_MAX = 2000
+# Opcional: com uma chave do LocationIQ (plano gratuito, 5k req/dia) o app deixa de
+# depender do servidor público e o 429 some. Basta definir LOCATIONIQ_API_KEY no Render.
+LOCATIONIQ_API_KEY = os.environ.get("LOCATIONIQ_API_KEY", "").strip()
 
-    Faz até `tentativas` chamadas: o servidor público do Nominatim é instável sob carga/timeout
-    ocasional, e antes uma única falha (rede lenta, 429/503 momentâneo) já deixava o registro só
-    com lat/long salvos, sem endereço."""
+_cache_enderecos = {}
+_cache_falhas = {}
+_provedor_bloqueado_ate = {}
+_geocode_lock = threading.Lock()
+_geocode_ultima_chamada = {}
+
+
+def _chave_geocode(latitude, longitude):
+    """Arredonda para ~1 metro: batidas no mesmo local caem todas na mesma chave de cache."""
+    return (round(float(latitude), 5), round(float(longitude), 5))
+
+
+def _aguardar_vez(provedor):
+    """Serializa as chamadas e garante o intervalo mínimo exigido pelo provedor."""
+    with _geocode_lock:
+        espera = GEOCODE_INTERVALO_MINIMO - (time.monotonic() - _geocode_ultima_chamada.get(provedor, 0.0))
+        if espera > 0:
+            time.sleep(espera)
+        _geocode_ultima_chamada[provedor] = time.monotonic()
+
+
+def _provedor_indisponivel(provedor):
+    """Um 429 não é passageiro: no IP compartilhado do Render o Nominatim recusa tudo por
+    um bom tempo. Depois do primeiro 429 paramos de bater nele por alguns minutos e vamos
+    direto no provedor alternativo — assim a batida do ponto não perde tempo tentando."""
+    ate = _provedor_bloqueado_ate.get(provedor)
+    return bool(ate) and time.monotonic() < ate
+
+
+def _bloquear_provedor(provedor, motivo):
+    _provedor_bloqueado_ate[provedor] = time.monotonic() + GEOCODE_TTL_BLOQUEIO
+    print(f"[endereco] {provedor} em cooldown por {GEOCODE_TTL_BLOQUEIO}s ({motivo})")
+
+
+def _guardar_no_cache(chave, endereco):
+    if len(_cache_enderecos) >= GEOCODE_CACHE_MAX:
+        _cache_enderecos.clear()
+    _cache_enderecos[chave] = endereco
+
+
+def _endereco_ja_conhecido(chave):
+    """Procura no banco um registro na MESMA coordenada que já tenha endereço resolvido.
+    É um cache que sobrevive ao restart do processo (o de memória não) e evita ir na rede
+    para o endereço da empresa, que se repete em praticamente todas as batidas."""
+    latitude, longitude = chave
+    delta = 0.00005
+    try:
+        registro = (
+            RegistroPonto.query
+            .filter(RegistroPonto.endereco.isnot(None))
+            .filter(RegistroPonto.latitude.between(latitude - delta, latitude + delta))
+            .filter(RegistroPonto.longitude.between(longitude - delta, longitude + delta))
+            .first()
+        )
+        return registro.endereco if registro else None
+    except Exception:
+        # Sem contexto de app / banco indisponível: segue para a rede normalmente.
+        return None
+
+
+def _montar_endereco(partes):
+    """Junta as partes ignorando vazios e repetições (ex.: cidade == município)."""
+    resultado = []
+    for parte in partes:
+        parte = (parte or "").strip()
+        if parte and parte not in resultado:
+            resultado.append(parte)
+    return ", ".join(resultado) or None
+
+
+def _provedor_locationiq(latitude, longitude):
+    resposta = requests.get(
+        "https://us1.locationiq.com/v1/reverse",
+        params={
+            "key": LOCATIONIQ_API_KEY,
+            "lat": latitude,
+            "lon": longitude,
+            "format": "json",
+            "zoom": 18,
+            "accept-language": "pt-BR",
+        },
+        timeout=8,
+    )
+    if resposta.status_code != 200:
+        return None, f"status {resposta.status_code}"
+    return (resposta.json() or {}).get("display_name"), "sem display_name"
+
+
+def _provedor_nominatim(latitude, longitude):
+    resposta = requests.get(
+        "https://nominatim.openstreetmap.org/reverse",
+        params={
+            "format": "jsonv2",
+            "lat": latitude,
+            "lon": longitude,
+            "zoom": 18,
+            "addressdetails": 1,
+        },
+        headers={
+            # O Nominatim exige um User-Agent que identifique a aplicação (política de uso
+            # deles); sem isso as requisições podem ser bloqueadas silenciosamente.
+            "User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})",
+            "Accept-Language": "pt-BR",
+        },
+        timeout=8,
+    )
+    if resposta.status_code != 200:
+        return None, f"status {resposta.status_code}"
+    return (resposta.json() or {}).get("display_name"), "sem display_name"
+
+
+def _provedor_photon(latitude, longitude):
+    """Photon (komoot) — mesma base do OpenStreetMap, sem chave e sem o limite agressivo."""
+    resposta = requests.get(
+        "https://photon.komoot.io/reverse",
+        params={"lat": latitude, "lon": longitude},
+        headers={"User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})"},
+        timeout=8,
+    )
+    if resposta.status_code != 200:
+        return None, f"status {resposta.status_code}"
+    feicoes = (resposta.json() or {}).get("features") or []
+    if not feicoes:
+        return None, "sem resultados"
+    p = feicoes[0].get("properties") or {}
+    rua = " ".join(x for x in [p.get("street") or p.get("name"), p.get("housenumber")] if x)
+    return _montar_endereco([
+        rua, p.get("district"), p.get("city") or p.get("county"),
+        p.get("state"), p.get("postcode"), p.get("country"),
+    ]), "sem endereço utilizável"
+
+
+def _provedor_bigdatacloud(latitude, longitude):
+    """Último recurso: sem chave e sem limite prático, mas resolve só até o nível de bairro."""
+    resposta = requests.get(
+        "https://api.bigdatacloud.net/data/reverse-geocode-client",
+        params={"latitude": latitude, "longitude": longitude, "localityLanguage": "pt"},
+        timeout=8,
+    )
+    if resposta.status_code != 200:
+        return None, f"status {resposta.status_code}"
+    d = resposta.json() or {}
+    return _montar_endereco([
+        d.get("locality"), d.get("city"), d.get("principalSubdivision"), d.get("countryName"),
+    ]), "sem endereço utilizável"
+
+
+# Rótulo exibido para cada tipo de marcação (o banco guarda "entrada"/"saida" e registros
+# antigos podem não ter tipo nenhum).
+ROTULOS_TIPO_REGISTRO = {"entrada": "Entrada", "saida": "Saída"}
+
+
+def obter_endereco(latitude, longitude, tentativas=2, orcamento=12.0):
+    """Converte latitude/longitude em um endereço legível.
+
+    Retorna None se as coordenadas não vierem ou se todos os provedores falharem (sem
+    quebrar o registro do ponto) — mas SEMPRE imprime o motivo no log, para dar pra
+    diagnosticar pelo Render.
+
+    `orcamento` é o tempo máximo (em segundos) gasto tentando os provedores. O registro
+    do ponto espera por essa função, então é melhor salvar a batida só com lat/long e
+    preencher o endereço depois (botão do gestor) do que deixar o colaborador travado."""
     if latitude is None or longitude is None:
         return None
 
-    ultimo_erro = None
-    for tentativa in range(1, tentativas + 1):
-        try:
-            resposta = requests.get(
-                "https://nominatim.openstreetmap.org/reverse",
-                params={
-                    "format": "jsonv2",
-                    "lat": latitude,
-                    "lon": longitude,
-                    "zoom": 18,
-                    "addressdetails": 1,
-                },
-                headers={
-                    # O Nominatim exige um User-Agent que identifique a aplicação (política de uso
-                    # deles); sem isso as requisições podem ser bloqueadas silenciosamente.
-                    "User-Agent": f"SmartPoint-ControleDePonto/1.0 (contato: {VAPID_CONTACT_EMAIL})",
-                    "Accept-Language": "pt-BR",
-                },
-                timeout=8,
-            )
-            if resposta.status_code != 200:
-                print(f"[endereco] tentativa {tentativa}/{tentativas}: Nominatim respondeu {resposta.status_code} para ({latitude}, {longitude}): {resposta.text[:200]}")
-                ultimo_erro = f"status {resposta.status_code}"
-                time.sleep(1)
-                continue
-            dados = resposta.json()
-            endereco = dados.get("display_name")
-            if not endereco:
-                print(f"[endereco] tentativa {tentativa}/{tentativas}: Nominatim não retornou display_name para ({latitude}, {longitude}): {dados}")
-                ultimo_erro = "sem display_name"
-                time.sleep(1)
-                continue
-            return endereco
-        except Exception as ex:
-            print(f"[endereco] tentativa {tentativa}/{tentativas}: falha ao geocodificar ({latitude}, {longitude}): {ex}")
-            ultimo_erro = str(ex)
-            time.sleep(1)
+    try:
+        chave = _chave_geocode(latitude, longitude)
+    except (TypeError, ValueError):
+        return None
 
-    print(f"[endereco] desistindo após {tentativas} tentativas para ({latitude}, {longitude}): {ultimo_erro}")
+    if chave in _cache_enderecos:
+        return _cache_enderecos[chave]
+
+    conhecido = _endereco_ja_conhecido(chave)
+    if conhecido:
+        _guardar_no_cache(chave, conhecido)
+        return conhecido
+
+    falhou_em = _cache_falhas.get(chave)
+    if falhou_em and (time.monotonic() - falhou_em) < GEOCODE_TTL_FALHA:
+        # Já tentamos essa coordenada há pouco e todos os provedores recusaram: insistir
+        # agora só piora o 429. Volta a tentar depois do TTL.
+        return None
+
+    provedores = [("nominatim", _provedor_nominatim), ("photon", _provedor_photon),
+                  ("bigdatacloud", _provedor_bigdatacloud)]
+    if LOCATIONIQ_API_KEY:
+        provedores.insert(0, ("locationiq", _provedor_locationiq))
+
+    limite = time.monotonic() + max(orcamento, 0)
+    ultimo_erro = None
+    for nome, consultar in provedores:
+        if _provedor_indisponivel(nome):
+            continue
+        for tentativa in range(1, tentativas + 1):
+            if time.monotonic() > limite:
+                ultimo_erro = f"{ultimo_erro} (orçamento de {orcamento:.0f}s esgotado)"
+                print(f"[endereco] parando em ({latitude}, {longitude}): {ultimo_erro}")
+                _cache_falhas[chave] = time.monotonic()
+                return None
+            try:
+                _aguardar_vez(nome)
+                endereco, motivo = consultar(latitude, longitude)
+                if endereco:
+                    _guardar_no_cache(chave, endereco)
+                    _cache_falhas.pop(chave, None)
+                    return endereco
+                ultimo_erro = f"{nome}: {motivo}"
+            except Exception as ex:
+                motivo = str(ex)
+                ultimo_erro = f"{nome}: {ex}"
+            print(f"[endereco] {nome} tentativa {tentativa}/{tentativas} falhou para ({latitude}, {longitude}): {ultimo_erro}")
+            if motivo in ("status 429", "status 403", "status 503"):
+                _bloquear_provedor(nome, motivo)
+                break  # não adianta insistir: parte pro próximo provedor
+            if tentativa < tentativas:
+                time.sleep(2 ** tentativa)  # backoff: 2s, 4s...
+
+    _cache_falhas[chave] = time.monotonic()
+    print(f"[endereco] desistindo de ({latitude}, {longitude}) por {GEOCODE_TTL_FALHA}s — último erro: {ultimo_erro}")
     return None
 
 
@@ -1669,12 +1857,13 @@ def exportar_csv():
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Colaborador", "Data/Hora (Horário de Brasília)", "Endereço", "Latitude", "Longitude", "Distância Facial"])
+    writer.writerow(["Colaborador", "Data/Hora (Horário de Brasília)", "Tipo", "Endereço", "Latitude", "Longitude", "Distância Facial"])
     for r in registros:
         horario_local = para_brasilia(r.data_hora)
         writer.writerow([
             r.colaborador.nome,
             horario_local.strftime("%d/%m/%Y %H:%M:%S"),
+            ROTULOS_TIPO_REGISTRO.get((r.tipo or "").lower(), ""),
             r.endereco or "",
             r.latitude,
             r.longitude,
@@ -1692,8 +1881,8 @@ def exportar_csv():
 @gestor_required
 def preencher_enderecos():
     """Recupera o endereço de registros antigos que ficaram sem (ex.: por falha temporária
-    na geocodificação). Processa em lotes pequenos para respeitar o limite de 1 req/s do
-    Nominatim — clique de novo para continuar preenchendo o restante."""
+    na geocodificação). Processa em lotes pequenos para respeitar o limite de 1 req/s dos
+    serviços de geocodificação — clique de novo para continuar preenchendo o restante."""
     pendentes = (
         RegistroPonto.query
         .filter(RegistroPonto.endereco.is_(None))
@@ -1705,11 +1894,13 @@ def preencher_enderecos():
 
     preenchidos = 0
     for r in pendentes:
-        endereco = obter_endereco(r.latitude, r.longitude)
+        # Aqui ninguém está esperando na tela, então vale insistir mais que na batida.
+        endereco = obter_endereco(r.latitude, r.longitude, tentativas=3, orcamento=30.0)
         if endereco:
             r.endereco = endereco
             preenchidos += 1
-        time.sleep(1.1)  # respeita o limite de uso do Nominatim (~1 requisição/segundo)
+        # Sem sleep aqui: obter_endereco já cuida do intervalo entre chamadas e resolve
+        # coordenadas repetidas pelo cache, sem ir na rede de novo.
     db.session.commit()
 
     restantes = RegistroPonto.query.filter(

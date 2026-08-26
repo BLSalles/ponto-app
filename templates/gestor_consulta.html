@@ -111,6 +111,7 @@
         <tr>
           <th>Colaborador</th>
           <th>Data/Hora (Brasília)</th>
+          <th>Tipo</th>
           <th>Localização</th>
           <th>Confiança facial</th>
         </tr>
@@ -120,6 +121,16 @@
         <tr>
           <td>{{ r.colaborador.nome }}</td>
           <td>{{ r.data_hora | brasilia }}</td>
+          <td>
+            {% set tipo = (r.tipo or '') | lower %}
+            {% if tipo == 'entrada' %}
+              <span class="badge badge-entrada">↓ Entrada</span>
+            {% elif tipo == 'saida' %}
+              <span class="badge badge-saida">↑ Saída</span>
+            {% else %}
+              —
+            {% endif %}
+          </td>
           <td class="celula-localizacao">
             {% if r.latitude and r.longitude %}
               <a href="https://www.google.com/maps?q={{ r.latitude }},{{ r.longitude }}" target="_blank">
@@ -139,7 +150,7 @@
           <td>{{ "%.3f"|format(r.distancia_facial) if r.distancia_facial is not none else "—" }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="4" class="vazio">Nenhum registro encontrado.</td></tr>
+        <tr><td colspan="5" class="vazio">Nenhum registro encontrado.</td></tr>
         {% endfor %}
       </tbody>
     </table>
