@@ -2053,6 +2053,70 @@ def _listar_pendentes_excepcionais():
         return []
 
 
+HISTORICO_AJUSTES_MAX = 500  # teto de itens carregados por tipo antes de paginar em memória
+
+
+def _historico_ajustes():
+    """Junta num histórico só as DUAS coisas que o gestor decide nesta tela: as solicitações
+    de ajuste do colaborador e as jornadas excepcionais.
+
+    Antes o histórico listava apenas SolicitacaoAjuste — uma jornada excepcional aprovada ou
+    recusada sumia da tela sem deixar rastro nenhum, e não dava pra conferir depois o que tinha
+    sido decidido. A observação escrita pelo gestor (resposta_gestor) também era gravada no
+    banco mas nunca exibida em lugar nenhum."""
+    itens = []
+
+    solicitacoes = (
+        SolicitacaoAjuste.query
+        .filter(SolicitacaoAjuste.status != "pendente")
+        .order_by(SolicitacaoAjuste.respondido_em.desc())
+        .limit(HISTORICO_AJUSTES_MAX)
+        .all()
+    )
+    for s in solicitacoes:
+        rotulo = ROTULOS_TIPO_REGISTRO.get((s.tipo or "").lower(), s.tipo or "")
+        itens.append({
+            "categoria": "Ajuste de ponto",
+            "colaborador": s.colaborador.nome,
+            "referencia": f"{s.data_referencia.strftime('%d/%m/%Y')} — {rotulo} às {s.horario_solicitado}",
+            "detalhe": s.motivo,
+            "status": s.status,
+            "respondido_em": s.respondido_em,
+            "resposta_gestor": s.resposta_gestor,
+        })
+
+    # Mesma proteção de _listar_pendentes_excepcionais: a tabela pode não existir num banco
+    # antigo, e isso não pode derrubar a tela inteira.
+    try:
+        excepcionais = (
+            AprovacaoJornadaExcepcional.query
+            .filter(AprovacaoJornadaExcepcional.status != "pendente")
+            .order_by(AprovacaoJornadaExcepcional.respondido_em.desc())
+            .limit(HISTORICO_AJUSTES_MAX)
+            .all()
+        )
+    except Exception as ex:
+        db.session.rollback()
+        print(f"[jornada-excepcional] falha ao listar histórico: {ex}")
+        excepcionais = []
+
+    for a in excepcionais:
+        itens.append({
+            "categoria": "Jornada excepcional",
+            "colaborador": a.colaborador.nome,
+            "referencia": f"{a.data_referencia.strftime('%d/%m/%Y')} — {a.horas_total:.1f}h nessa sessão",
+            "detalhe": None,
+            "status": a.status,
+            "respondido_em": a.respondido_em,
+            "resposta_gestor": a.resposta_gestor,
+        })
+
+    # Item sem respondido_em (gravado antes desse campo existir) vai pro fim da lista, mas
+    # continua aparecendo — some do histórico é pior do que aparecer sem data.
+    itens.sort(key=lambda i: i["respondido_em"] or datetime.min, reverse=True)
+    return itens
+
+
 @app.route("/gestor/ajustes", methods=["GET"])
 @gestor_required
 def gestor_ajustes():
@@ -2066,12 +2130,8 @@ def gestor_ajustes():
         param="p_pendentes",
         ancora="solicitacoes-pendentes",
     )
-    historico = paginar_query(
-        SolicitacaoAjuste.query
-        .filter(SolicitacaoAjuste.status != "pendente")
-        .order_by(SolicitacaoAjuste.respondido_em.desc()),
-        param="p_historico",
-        ancora="historico-ajustes",
+    historico = paginar_lista(
+        _historico_ajustes(), param="p_historico", ancora="historico-ajustes"
     )
 
     # Jornadas excepcionais (sessão contínua > LIMITE_HORAS_EXCEPCIONAL) aguardando revisão —

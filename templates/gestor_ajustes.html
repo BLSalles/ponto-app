@@ -79,41 +79,54 @@
   {% endif %}
 </div>
 
-{% if historico.total %}
 <div class="card" id="historico-ajustes">
   <div class="card-header">
     <h2>Histórico</h2>
+    {% if historico.total %}<span class="badge badge-ok">{{ historico.total }}</span>{% endif %}
   </div>
+  {% if historico.total %}
   <div class="tabela-wrap">
     <table>
       <thead>
         <tr>
           <th>Colaborador</th>
+          <th>O quê</th>
           <th>Referência</th>
           <th>Status</th>
           <th>Respondido em</th>
+          <th>Observação do gestor</th>
         </tr>
       </thead>
       <tbody>
-        {% for s in historico.items %}
+        {% for h in historico.items %}
         <tr>
-          <td>{{ s.colaborador.nome }}</td>
-          <td>{{ s.data_referencia.strftime('%d/%m/%Y') }} — {{ 'Entrada' if s.tipo == 'entrada' else 'Saída' }} às {{ s.horario_solicitado }}</td>
+          <td>{{ h.colaborador }}</td>
+          <td>{{ h.categoria }}</td>
           <td>
-            {% if s.status == 'aprovado' %}
+            {{ h.referencia }}
+            {% if h.detalhe %}<span class="coordenadas-sub">Motivo: {{ h.detalhe }}</span>{% endif %}
+          </td>
+          <td>
+            {% if h.status == 'aprovado' %}
               <span class="badge badge-ok">Aprovado</span>
             {% else %}
               <span class="badge badge-erro">Recusado</span>
             {% endif %}
           </td>
-          <td>{{ s.respondido_em | brasilia if s.respondido_em else "—" }}</td>
+          <td>{{ h.respondido_em | brasilia if h.respondido_em else "—" }}</td>
+          <td>{{ h.resposta_gestor or "—" }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   {{ paginacao(historico) }}
+  {% else %}
+  <p class="vazio">
+    Nada aprovado ou recusado ainda. Assim que você responder uma solicitação de ajuste
+    ou uma jornada excepcional, ela fica registrada aqui.
+  </p>
+  {% endif %}
 </div>
-{% endif %}
 
 {% endblock %}
