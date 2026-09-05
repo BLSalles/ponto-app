@@ -865,7 +865,7 @@ def montar_resumo_diario(registros, horario_entrada_padrao=None):
 
     registros_ordenados = sorted(registros, key=lambda r: r.data_hora)
 
-    por_dia = defaultdict(lambda: {"segundos": 0.0, "batidas": [], "incompleto": False, "excepcional": False, "excepcional_entrada_id": None, "excepcional_saida_id": None})
+    por_dia = defaultdict(lambda: {"segundos": 0.0, "batidas": [], "incompleto": False, "excepcional": False, "excepcional_entrada_id": None, "excepcional_saida_id": None, "excepcional_horas": None})
     entrada_aberta = None  # datetime local da entrada aguardando a saída correspondente
     entrada_aberta_id = None  # id do RegistroPonto dessa entrada, pra poder corrigi-lo depois se preciso
 
@@ -899,6 +899,10 @@ def montar_resumo_diario(registros, horario_entrada_padrao=None):
                         # precisa virar ENTRADA (ver recusar_jornada_excepcional).
                         por_dia[entrada_aberta.date()]["excepcional_entrada_id"] = entrada_aberta_id
                         por_dia[entrada_aberta.date()]["excepcional_saida_id"] = r.id
+                        # Duração da sessão CONTÍNUA (sem fatiar). É esse número que o gestor
+                        # precisa ver pra decidir ("ficou 30h seguidas aqui?"), e não o total
+                        # já fatiado do dia — que depois do fatiamento nunca passa de 24h.
+                        por_dia[entrada_aberta.date()]["excepcional_horas"] = round(segundos / 3600, 2)
                 else:
                     por_dia[entrada_aberta.date()]["incompleto"] = True
                 entrada_aberta = None
@@ -928,6 +932,7 @@ def montar_resumo_diario(registros, horario_entrada_padrao=None):
             "excepcional": info["excepcional"],
             "excepcional_entrada_id": info["excepcional_entrada_id"],
             "excepcional_saida_id": info["excepcional_saida_id"],
+            "excepcional_horas": info["excepcional_horas"],
         })
     return resumo
 
@@ -994,7 +999,8 @@ def aplicar_status_excepcional(dia_resumo, colaborador_id):
             aprovacao = AprovacaoJornadaExcepcional(
                 colaborador_id=colaborador_id,
                 data_referencia=dia_resumo["data"],
-                horas_total=dia_resumo["total_horas_decimal"],
+                # Sessão contínua, não o total já fatiado do dia (ver montar_resumo_diario).
+                horas_total=dia_resumo.get("excepcional_horas") or dia_resumo["total_horas_decimal"],
                 status="pendente",
                 registro_entrada_id=dia_resumo.get("excepcional_entrada_id"),
                 registro_saida_id=dia_resumo.get("excepcional_saida_id"),
