@@ -11,6 +11,10 @@
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 
+  <!-- Captura de foto da câmera sem distorcer o rosto — usado pelo modal de cadastro
+       facial e pela batida do ponto. -->
+  <script src="{{ url_for('static', filename='js/captura.js') }}" defer></script>
+
   <!-- Cores da marca definidas pelo gestor em Configurações — sobrescreve os
        valores padrão do style.css, então todo o resto do CSS já reage sozinho. -->
   <style>

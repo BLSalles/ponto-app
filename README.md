@@ -45,6 +45,63 @@ O reconhecimento facial usa a biblioteca `face_recognition`, que depende do
 dependências de sistema. O build padrão do Render (buildpack Python) não
 inclui essas ferramentas, por isso o deploy é feito via Dockerfile.
 
+## Cadastro facial por link (o colaborador se cadastra sozinho)
+
+No Painel do Gestor → **Cadastro**, cada colaborador tem o botão **🔗 Link facial**. Ele gera
+um link para a pessoa abrir no próprio celular, tirar a foto e ter o rosto cadastrado — sem o
+gestor precisar ir até ela.
+
+Limites do link, porque **quem abre cadastra o rosto que estiver na frente da câmera**:
+
+- vale **uma vez só** (depois de usado, para de funcionar);
+- **expira em 48h** (`CONVITE_FACIAL_HORAS` em `app.py`);
+- gerar um link novo para a mesma pessoa **invalida o anterior na hora**, então link velho que
+  ficou perdido num grupo de WhatsApp não serve mais;
+- se o rosto enviado já estiver cadastrado para OUTRA pessoa, o cadastro é recusado (e o nome
+  da outra pessoa não é revelado a quem está com o link — só aparece no log do servidor).
+
+Mande o link direto para a pessoa certa (o botão de WhatsApp/e-mail já monta a mensagem).
+
+## Ajustando o reconhecimento facial
+
+A batida do ponto compara o rosto da câmera com o rosto cadastrado do colaborador que
+**já entrou com e-mail e senha** — é uma checagem 1 contra 1, não uma identificação
+"quem é essa pessoa". A distância entre os dois rostos precisa ficar abaixo de
+`FACE_MATCH_TOLERANCE` (padrão `0.55`; a biblioteca `face_recognition` usa `0.6`).
+
+- **Colaboradores apanhando pra bater o ponto?** Suba a tolerância de 0.05 em 0.05 na
+  variável de ambiente `FACE_MATCH_TOLERANCE` (aceita de 0.30 a 0.70). Não precisa mexer
+  no código nem refazer o build.
+- **Como calibrar sem chutar:** cada tentativa imprime a distância real no log do Render:
+  `[facial] Rejeitado: Ana (distância=0.5831, tolerância=0.55)`. Se as rejeições da pessoa
+  certa estão na casa de 0.56–0.60, é a tolerância que está apertada.
+- A detecção de rosto duplicado no cadastro usa um limiar próprio e mais estrito
+  (`FACE_DUPLICADO_TOLERANCE`, padrão `0.45`), porque ali a comparação é contra todos os
+  cadastrados e um falso positivo é bem mais caro.
+- **A foto do cadastro manda no resultado.** Tire com boa luz, de frente, rosto centralizado
+  e sem óculos escuros/boné. Uma foto ruim no cadastro faz TODA batida daquela pessoa ficar
+  no limite.
+
+## Jornada que vira a noite
+
+Uma sessão (entrada → saída) que atravessa a meia-noite pertence ao dia em que a ENTRADA
+aconteceu, mas as horas **param de ser creditadas nesse dia no horário de entrada padrão do dia
+seguinte** — dali em diante a pessoa já está cumprindo o expediente normal do outro dia.
+
+Exemplo com jornada padrão começando às 08:00: entrou 08:00 do dia 2 e saiu 14:00 do dia 3.
+
+| Dia | Horas | Por quê |
+|---|---|---|
+| Dia 2 | 24h (08:00 do dia 2 → 08:00 do dia 3) | turno que virou — vira hora extra |
+| Dia 3 | 6h (08:00 → 14:00) | expediente normal do dia 3 |
+
+Turno da noite que termina ANTES do horário de entrada (ex.: 22:00 → 06:00) **não** é
+fatiado: continua inteiro no dia em que começou.
+
+O alerta de **jornada excepcional** continua olhando a sessão contínua inteira (as 30h do
+exemplo), não a fatia — então o gestor ainda revisa o caso antes das horas extras entrarem
+no total do mês.
+
 ## Limitações desta versão simples (V1)
 
 - Banco de dados gratuito do Render tem limite de armazenamento e expira

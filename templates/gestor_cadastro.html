@@ -56,6 +56,14 @@
         {% else %}
           <span class="badge badge-ok">Rosto cadastrado</span>
         {% endif %}
+        {% if not c.is_gestor %}
+          <form method="POST" action="{{ url_for('gerar_convite_facial', colaborador_id=c.id) }}" style="margin:0;">
+            <button type="submit" class="btn-secundario" style="margin-top:0;"
+                    title="Gera um link para o colaborador cadastrar o rosto pelo celular dele">
+              🔗 Link facial
+            </button>
+          </form>
+        {% endif %}
         <a href="{{ url_for('editar_colaborador', colaborador_id=c.id) }}" class="btn-secundario" style="margin-top:0;">✏️ Editar</a>
       </div>
     {% else %}

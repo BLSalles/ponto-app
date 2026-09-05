@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block titulo %}Cadastro facial{% endblock %}
+{% block conteudo %}
+
+{% if not convite %}
+
+  <div class="card card-aviso">
+    <h2 style="margin-top:0;">Não foi possível abrir o cadastro</h2>
+    <p class="ajuste-motivo" style="margin-bottom:0;">{{ motivo }}</p>
+  </div>
+
+{% else %}
+
+  <div class="card">
+    <div class="card-header">
+      <h2>Olá, {{ convite.colaborador.nome.split()[0] }}!</h2>
+    </div>
+    <p class="ajuste-motivo">
+      {% if ja_tem_rosto %}
+        Vamos <strong>atualizar</strong> a foto do seu rosto. A foto anterior será substituída.
+      {% else %}
+        Vamos cadastrar o seu rosto para você bater o ponto pelo celular.
+      {% endif %}
+    </p>
+    <ul class="ajuste-motivo" style="padding-left:1.2rem; line-height:1.7;">
+      <li>Fique num lugar <strong>bem iluminado</strong>, com a luz na sua frente (não atrás).</li>
+      <li>Olhe direto para a câmera, rosto centralizado no quadro.</li>
+      <li>Sem óculos escuros, boné ou máscara.</li>
+    </ul>
+
+    <div class="oval-camera">
+      <video id="video-convite" autoplay playsinline muted></video>
+      <div class="oval-anel" id="anel-convite"></div>
+      <div class="check-badge" id="check-convite">
+        <svg id="icone-convite" viewBox="0 0 24 24" width="30" height="30" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <p class="modal-facial-status" id="status-convite">Iniciando a câmera...</p>
+
+    <div class="modal-facial-controles">
+      <button type="button" class="modal-controle-btn" id="btn-trocar-convite" title="Trocar câmera">🔄</button>
+      <button type="button" class="modal-fechar-pill" id="btn-capturar-convite" disabled>📷 Cadastrar meu rosto</button>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const video = document.getElementById('video-convite');
+  const status = document.getElementById('status-convite');
+  const anel = document.getElementById('anel-convite');
+  const check = document.getElementById('check-convite');
+  const icone = document.getElementById('icone-convite');
+  const btnCapturar = document.getElementById('btn-capturar-convite');
+  const btnTrocar = document.getElementById('btn-trocar-convite');
+
+  const iconeCheck = '<path d="M5 13l4 4L19 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+  const iconeErro = '<path d="M6 6l12 12M18 6L6 18" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+
+  let streamAtual = null;
+  let facingMode = 'user';
+  let enviando = false;
+
+  function abrirCamera(modo) {
+    if (streamAtual) streamAtual.getTracks().forEach(t => t.stop());
+    return navigator.mediaDevices.getUserMedia({ video: { facingMode: modo, width: { ideal: 1280 }, height: { ideal: 720 } } })
+      .then(stream => {
+        streamAtual = stream;
+        video.srcObject = stream;
+        btnCapturar.disabled = false;
+        status.textContent = 'Posicione o rosto no quadro e toque no botão.';
+        status.className = 'modal-facial-status';
+      });
+  }
+
+  function pararCamera() {
+    if (streamAtual) streamAtual.getTracks().forEach(t => t.stop());
+    streamAtual = null;
+  }
+
+  function falhar(mensagem) {
+    icone.outerHTML = '<svg id="icone-convite" viewBox="0 0 24 24" width="30" height="30" fill="none">' + iconeErro + '</svg>';
+    check.className = 'check-badge mostrar check-badge-erro';
+    anel.className = 'oval-anel anel-erro';
+    status.textContent = mensagem;
+    status.className = 'modal-facial-status status-erro';
+  }
+
+  abrirCamera(facingMode).catch(() => {
+    status.textContent = 'Não conseguimos acessar a câmera. Autorize o acesso no navegador e recarregue a página.';
+    status.className = 'modal-facial-status status-erro';
+  });
+
+  btnTrocar.addEventListener('click', () => {
+    facingMode = facingMode === 'user' ? 'environment' : 'user';
+    abrirCamera(facingMode).catch(() => {
+      status.textContent = 'Não foi possível trocar de câmera.';
+    });
+  });
+
+  btnCapturar.addEventListener('click', () => {
+    if (enviando) return;
+    enviando = true;
+    btnCapturar.disabled = true;
+    check.className = 'check-badge';
+    anel.className = 'oval-anel';
+    status.textContent = 'Enviando...';
+    status.className = 'modal-facial-status';
+
+    fetch('{{ url_for("api_cadastro_facial_convite", token=token) }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ foto: window.capturarFrameFacial(video) })
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.ok) {
+          pararCamera();
+          check.className = 'check-badge mostrar';
+          anel.className = 'oval-anel anel-sucesso';
+          status.innerHTML = '✅ <strong>' + data.mensagem + '</strong>';
+          status.className = 'modal-facial-status status-sucesso';
+          btnCapturar.textContent = 'Pronto!';
+          return;  // link é de uso único: não reabilita o botão
+        }
+
+        if (data.reposicionar) {
+          // Erro de enquadramento: dá pra tentar de novo com o mesmo link.
+          anel.className = 'oval-anel anel-atencao';
+          status.textContent = '⚠️ ' + data.mensagem;
+          status.className = 'modal-facial-status status-atencao';
+          btnCapturar.disabled = false;
+          enviando = false;
+          return;
+        }
+
+        falhar(data.mensagem || 'Não foi possível cadastrar.');
+      })
+      .catch(() => {
+        falhar('Erro de conexão. Verifique a internet e tente de novo.');
+        btnCapturar.disabled = false;
+        enviando = false;
+      });
+  });
+})();
+</script>
+
+{% endif %}
+
+{% endblock %}

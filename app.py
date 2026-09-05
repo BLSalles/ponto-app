@@ -4,6 +4,7 @@ import csv
 import base64
 import json
 import time
+import secrets
 import threading
 import numpy as np
 import requests
@@ -19,12 +20,20 @@ from flask import (
 )
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 import face_recognition
 
 # ---------------------------------------------------------------------------
 # Configuração básica
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+
+# O Render (como qualquer PaaS) coloca um proxy na frente da aplicação: o gunicorn recebe a
+# requisição em http, mesmo que o usuário tenha acessado em https. Sem ler os cabeçalhos
+# X-Forwarded-*, url_for(..., _external=True) gera link "http://" e com o host errado — o que
+# quebraria justamente o link de cadastro facial que mandamos para o colaborador.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "troque-esta-chave-em-producao")
 
 # Usa Postgres se DATABASE_URL estiver definida (Render), senão SQLite local.
@@ -48,10 +57,33 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 db = SQLAlchemy(app)
 
 # Distância máxima aceita entre encodings faciais para considerar "é a mesma pessoa".
-# Quanto menor, mais rígido. 0.6 é o padrão "solto" da biblioteca face_recognition;
-# usamos um valor mais estrito porque é melhor pedir pra tentar de novo do que
-# aceitar o rosto de outra pessoa por engano.
-FACE_MATCH_TOLERANCE = 0.45
+# Quanto MENOR, mais rígido. O padrão da biblioteca face_recognition é 0.6.
+#
+# São dois limiares diferentes porque são duas perguntas diferentes:
+#
+# 1) FACE_MATCH_TOLERANCE — bater o ponto. Aqui a pessoa JÁ entrou com e-mail e senha, e
+#    só comparamos o rosto dela com o rosto dela mesma (1 contra 1). O rosto é a segunda
+#    prova, não a única. 0.45 era rígido demais para essa checagem: variação normal de luz,
+#    óculos, barba, maquiagem ou ângulo já passava desse valor e barrava a pessoa certa.
+#
+# 2) FACE_DUPLICADO_TOLERANCE — detectar rosto duplicado no cadastro. Aqui comparamos um
+#    rosto novo contra TODOS os cadastrados (1 contra N), e o erro custa caro nos dois
+#    sentidos, então segue no valor estrito de antes.
+#
+# Dá pra ajustar sem alterar o código: defina FACE_MATCH_TOLERANCE no Render. Se os
+# colaboradores ainda apanharem, suba de 0.05 em 0.05 (o log imprime a distância real de
+# cada tentativa, dá pra calibrar em cima dos números de verdade).
+def _tolerancia_env(nome, padrao):
+    try:
+        valor = float(os.environ.get(nome, padrao))
+    except (TypeError, ValueError):
+        return padrao
+    # Fora dessa faixa não é ajuste, é desligar o reconhecimento (ou travar tudo).
+    return min(max(valor, 0.30), 0.70)
+
+
+FACE_MATCH_TOLERANCE = _tolerancia_env("FACE_MATCH_TOLERANCE", 0.55)
+FACE_DUPLICADO_TOLERANCE = _tolerancia_env("FACE_DUPLICADO_TOLERANCE", 0.45)
 
 # ---------------------------------------------------------------------------
 # Fuso horário - Brasília
@@ -138,6 +170,26 @@ class SolicitacaoAjuste(db.Model):
     resposta_gestor = db.Column(db.Text, nullable=True)
 
     colaborador = db.relationship("Colaborador", backref="solicitacoes_ajuste")
+
+
+class ConviteFacial(db.Model):
+    """Link de uso único para o colaborador cadastrar o PRÓPRIO rosto, sem o gestor precisar
+    ir até ele com o aparelho na mão.
+
+    Três limites deliberados, porque quem tem o link consegue gravar um rosto no cadastro de
+    outra pessoa: o token é aleatório e longo, vale uma vez só, e expira sozinho. Gerar um
+    convite novo derruba o anterior — assim não fica link velho circulando no WhatsApp."""
+    id = db.Column(db.Integer, primary_key=True)
+    colaborador_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=False)
+    token = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    criado_em = db.Column(db.DateTime, default=datetime.utcnow)
+    expira_em = db.Column(db.DateTime, nullable=False)
+    usado_em = db.Column(db.DateTime, nullable=True)
+    criado_por_id = db.Column(db.Integer, db.ForeignKey("colaborador.id"), nullable=True)
+
+    colaborador = db.relationship(
+        "Colaborador", foreign_keys=[colaborador_id], backref="convites_faciais"
+    )
 
 
 class AprovacaoJornadaExcepcional(db.Model):
@@ -408,6 +460,12 @@ def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
 
     localizacoes = face_recognition.face_locations(imagem)
     if not localizacoes:
+        # Segunda passada com upsample=2: o detector HOG padrão (upsample=1) perde rostos
+        # pequenos, meio de lado ou com pouca luz. É mais lento, mas só roda quando a
+        # primeira passada não achou nada — bem melhor do que devolver "não identificamos
+        # um rosto" pra quem está olhando direto pra câmera.
+        localizacoes = face_recognition.face_locations(imagem, number_of_times_to_upsample=2)
+    if not localizacoes:
         return None, "sem_rosto"
 
     if len(localizacoes) > 1:
@@ -424,9 +482,13 @@ def imagem_base64_para_encoding(imagem_base64, num_jitters=2):
     area_imagem = altura_img * largura_img
     proporcao = (area_rosto / area_imagem) if area_imagem else 0
 
-    if proporcao < 0.035:
+    # Faixa proposital de enquadramento generosa: ela existe só pra barrar o caso extremo
+    # (pessoa no fundo da sala, ou colada na lente cortando metade do rosto). Os limites
+    # antigos (3,5% a 45%) reprovavam selfie normal de celular — de braço estendido em
+    # retrato o rosto passa fácil de 45% da área do quadro.
+    if proporcao < 0.02:
         return None, "muito_longe"
-    if proporcao > 0.45:
+    if proporcao > 0.60:
         return None, "muito_perto"
 
     encodings = face_recognition.face_encodings(imagem, known_face_locations=localizacoes, num_jitters=num_jitters)
@@ -744,7 +806,45 @@ def determinar_proximo_tipo(colaborador_id):
 LIMITE_HORAS_EXCEPCIONAL = 14.0  # sessão contínua (entrada->saída) acima disso não vira hora extra sozinha; fica pendente de aprovação do gestor
 
 
-def montar_resumo_diario(registros):
+def fatiar_sessao_por_dia(entrada_local, saida_local, horario_entrada_padrao):
+    """Divide uma sessão trabalhada nos dias a que ela realmente pertence.
+
+    Uma sessão que atravessa a madrugada era contada INTEIRA no dia em que começou. Isso
+    inflava a hora extra quando o turno passava do horário de entrada do dia seguinte:
+    entrou 08:00 do dia 1 e saiu 14:00 do dia 2 virava 30h em cima do dia 1 (20h de hora
+    extra), quando na verdade das 08:00 do dia 2 em diante a pessoa já está cumprindo o
+    expediente NORMAL do dia 2 — aquilo não é esticar o turno do dia 1.
+
+    Então a sessão é cortada no horário de entrada padrão de cada dia seguinte: o pedaço
+    antes do corte fica no dia da entrada (é a virada, e vira hora extra), o pedaço depois
+    entra como jornada normal do dia seguinte. No exemplo: 24h no dia 1 + 6h no dia 2.
+
+    Turno da noite que termina ANTES do horário de entrada (ex.: 22:00 -> 06:00) não é
+    cortado: continua inteiro no dia em que começou, como antes.
+
+    Devolve uma lista de (dia, segundos).
+    """
+    try:
+        hora, minuto = (int(p) for p in (horario_entrada_padrao or "08:00").split(":"))
+    except (TypeError, ValueError):
+        hora, minuto = 8, 0
+
+    fatias = []
+    inicio = entrada_local
+    while True:
+        # O corte é sempre no dia civil seguinte ao de `inicio`, então é estritamente maior
+        # que `inicio` — o laço sempre avança (cobre também sessões de vários dias).
+        corte = (inicio + timedelta(days=1)).replace(
+            hour=hora, minute=minuto, second=0, microsecond=0
+        )
+        if corte >= saida_local:
+            fatias.append((inicio.date(), (saida_local - inicio).total_seconds()))
+            return fatias
+        fatias.append((inicio.date(), (corte - inicio).total_seconds()))
+        inicio = corte
+
+
+def montar_resumo_diario(registros, horario_entrada_padrao=None):
     """Agrupa os registros em sessões trabalhadas (entrada -> saída) e soma por dia (Brasília).
 
     Antes, o pareamento era só por POSIÇÃO dentro do dia civil (1º=entrada, 2º=saída, 3º=entrada...),
@@ -753,10 +853,15 @@ def montar_resumo_diario(registros):
     do dia seguinte e era confundida com a entrada normal daquele dia, deslocando todos os pares
     seguintes e podendo gerar hora extra errada (às vezes bem grande) justamente no dia seguinte.
 
-    Agora o pareamento usa o `tipo` real de cada batida (entrada/saida) em ordem cronológica, e uma
-    sessão que atravessa a meia-noite é contada inteira no dia em que a ENTRADA aconteceu (convenção
-    comum de apuração de ponto: o dia de trabalho é o dia em que o turno começou)."""
+    Agora o pareamento usa o `tipo` real de cada batida (entrada/saida) em ordem cronológica. Uma
+    sessão que atravessa a meia-noite pertence ao dia em que a ENTRADA aconteceu (convenção comum
+    de apuração de ponto: o dia de trabalho é o dia em que o turno começou), MAS as horas param de
+    ser creditadas nesse dia no horário de entrada padrão do dia seguinte — daí em diante já é o
+    expediente normal do outro dia. Ver fatiar_sessao_por_dia()."""
     from collections import defaultdict
+
+    if horario_entrada_padrao is None:
+        horario_entrada_padrao = obter_configuracao().horario_entrada
 
     registros_ordenados = sorted(registros, key=lambda r: r.data_hora)
 
@@ -779,7 +884,14 @@ def montar_resumo_diario(registros):
             if entrada_aberta is not None:
                 segundos = (dt_local - entrada_aberta).total_seconds()
                 if segundos > 0:
-                    por_dia[entrada_aberta.date()]["segundos"] += segundos
+                    # As horas vão para os dias a que pertencem (ver fatiar_sessao_por_dia);
+                    # o dia da ENTRADA continua sendo o dono da sessão para efeito de alerta.
+                    for dia_fatia, segundos_fatia in fatiar_sessao_por_dia(
+                        entrada_aberta, dt_local, horario_entrada_padrao
+                    ):
+                        por_dia[dia_fatia]["segundos"] += segundos_fatia
+                    # O alerta de jornada excepcional olha a sessão CONTÍNUA inteira (não a
+                    # fatia): 30h seguidas continuam sendo 30h seguidas para o gestor revisar.
                     if segundos / 3600 > LIMITE_HORAS_EXCEPCIONAL:
                         por_dia[entrada_aberta.date()]["excepcional"] = True
                         # guarda os dois registros que formaram essa sessão longa: se o gestor
@@ -1344,8 +1456,12 @@ def registrar_ponto():
 
     distancia = np.linalg.norm(np.array(user.face_encoding) - np.array(encoding_atual))
 
+    # Log dos dois lados (aceito e rejeitado): sem ver a distribuição real das distâncias
+    # não dá pra calibrar a tolerância, só chutar.
+    print(f"[facial] {'Aceito' if distancia <= FACE_MATCH_TOLERANCE else 'Rejeitado'}: "
+          f"{user.nome} (distância={distancia:.4f}, tolerância={FACE_MATCH_TOLERANCE})")
+
     if distancia > FACE_MATCH_TOLERANCE:
-        print(f"[facial] Rejeitado: {user.nome} (distância={distancia:.4f}, tolerância={FACE_MATCH_TOLERANCE})")
         return jsonify({
             "ok": False,
             "mensagem": "O rosto não confere com o cadastrado.",
@@ -1751,9 +1867,112 @@ def encontrar_colaborador_por_rosto(encoding_novo, ignorar_id=None):
         if ignorar_id and c.id == ignorar_id:
             continue
         distancia = np.linalg.norm(np.array(c.face_encoding) - np.array(encoding_novo))
-        if distancia <= FACE_MATCH_TOLERANCE:
+        if distancia <= FACE_DUPLICADO_TOLERANCE:
             return c
     return None
+
+
+# ---------------------------------------------------------------------------
+# Rotas - cadastro facial por link (o colaborador se cadastra sozinho)
+# ---------------------------------------------------------------------------
+CONVITE_FACIAL_HORAS = 48  # validade do link enviado ao colaborador
+
+
+def _convite_facial_valido(token):
+    """Devolve (convite, motivo). `motivo` é None quando o convite pode ser usado; quando não
+    pode, é a frase que o colaborador vê na tela — sem revelar se o token existe ou não para
+    quem estiver chutando link."""
+    convite = ConviteFacial.query.filter_by(token=token).first() if token else None
+    if convite is None:
+        return None, "Link inválido. Peça um link novo ao seu gestor."
+    if convite.usado_em is not None:
+        return None, "Este link já foi usado. Se precisar cadastrar de novo, peça um link novo ao seu gestor."
+    if datetime.utcnow() > convite.expira_em:
+        return None, "Este link expirou. Peça um link novo ao seu gestor."
+    if convite.colaborador is None or not convite.colaborador.ativo:
+        return None, "Cadastro indisponível. Fale com seu gestor."
+    return convite, None
+
+
+@app.route("/gestor/colaborador/<int:colaborador_id>/convite-facial", methods=["POST"])
+@gestor_required
+def gerar_convite_facial(colaborador_id):
+    colaborador = Colaborador.query.get_or_404(colaborador_id)
+
+    # Derruba convites anteriores ainda abertos desse colaborador: vale sempre só o último
+    # link gerado, então um link antigo que vazou para de funcionar na hora.
+    (ConviteFacial.query
+        .filter_by(colaborador_id=colaborador.id, usado_em=None)
+        .update({"expira_em": datetime.utcnow()}, synchronize_session=False))
+
+    # Renderiza direto no POST em vez de redirecionar: o token não pode ir para a barra de
+    # endereço do gestor (histórico do navegador, log de acesso, print de tela compartilhado).
+    convite = ConviteFacial(
+        colaborador_id=colaborador.id,
+        token=secrets.token_urlsafe(32),
+        expira_em=datetime.utcnow() + timedelta(hours=CONVITE_FACIAL_HORAS),
+        criado_por_id=session.get("user_id"),
+    )
+    db.session.add(convite)
+    db.session.commit()
+
+    return render_template(
+        "gestor_convite_facial.html",
+        colaborador=colaborador,
+        link=url_for("cadastro_facial_convite", token=convite.token, _external=True),
+        expira_em=convite.expira_em,
+        horas_validade=CONVITE_FACIAL_HORAS,
+    )
+
+
+@app.route("/cadastro-facial/<token>", methods=["GET"])
+def cadastro_facial_convite(token):
+    """Página pública (sem login) que o colaborador abre pelo link do gestor."""
+    convite, motivo = _convite_facial_valido(token)
+    return render_template(
+        "cadastro_facial_convite.html",
+        convite=convite,
+        motivo=motivo,
+        token=token,
+        ja_tem_rosto=bool(convite and convite.colaborador.face_encoding is not None),
+    )
+
+
+@app.route("/api/cadastro-facial/<token>", methods=["POST"])
+def api_cadastro_facial_convite(token):
+    convite, motivo = _convite_facial_valido(token)
+    if convite is None:
+        return jsonify({"ok": False, "mensagem": motivo}), 403
+
+    dados = request.get_json(silent=True) or {}
+    foto_base64 = dados.get("foto")
+    if not foto_base64:
+        return jsonify({"ok": False, "mensagem": "Nenhuma foto recebida."}), 400
+
+    encoding, motivo_falha = imagem_base64_para_encoding(foto_base64)
+    if encoding is None:
+        mensagem = MENSAGENS_POSICIONAMENTO.get(motivo_falha, "Não foi possível reconhecer um rosto na foto.")
+        # reposicionar=True: é erro de enquadramento, dá pra tentar de novo sem novo link.
+        return jsonify({"ok": False, "mensagem": mensagem, "reposicionar": True}), 400
+
+    duplicado = encontrar_colaborador_por_rosto(encoding, ignorar_id=convite.colaborador_id)
+    if duplicado:
+        # Não diz de QUEM é o rosto: quem está com o link não é necessariamente o gestor.
+        print(f"[convite-facial] rosto de {convite.colaborador.nome} bate com {duplicado.nome} — cadastro recusado")
+        return jsonify({
+            "ok": False,
+            "mensagem": "Esse rosto já está cadastrado para outra pessoa. Fale com seu gestor.",
+        }), 409
+
+    convite.colaborador.face_encoding = encoding.tolist()
+    convite.usado_em = datetime.utcnow()
+    db.session.commit()
+
+    print(f"[convite-facial] rosto cadastrado para {convite.colaborador.nome} (convite {convite.id})")
+    return jsonify({
+        "ok": True,
+        "mensagem": "Rosto cadastrado com sucesso! Já dá para bater o ponto normalmente.",
+    })
 
 
 @app.route("/gestor/cadastrar", methods=["POST"])

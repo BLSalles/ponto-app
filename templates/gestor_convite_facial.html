@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block titulo %}Link de cadastro facial - Painel do Gestor{% endblock %}
+{% block conteudo %}
+
+<div class="card">
+  <div class="card-header">
+    <h2>Link de cadastro facial</h2>
+    <span class="badge badge-ok">{{ colaborador.nome }}</span>
+  </div>
+
+  <p class="ajuste-motivo">
+    Envie este link para <strong>{{ colaborador.nome }}</strong> ({{ colaborador.email }}).
+    Ele abre no celular, tira uma foto do próprio rosto e o cadastro facial fica pronto —
+    você não precisa ir até ele.
+  </p>
+
+  <div class="form-campo">
+    <label for="link-convite">Link (válido por {{ horas_validade }}h, uso único)</label>
+    <input type="text" id="link-convite" value="{{ link }}" readonly
+           onclick="this.select();" style="font-family: monospace; font-size: 13px;">
+  </div>
+
+  <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:.5rem;">
+    <button type="button" class="btn-primario" id="btn-copiar" style="margin-top:0;">📋 Copiar link</button>
+    <a class="btn-secundario" style="margin-top:0;" target="_blank" rel="noopener"
+       href="https://wa.me/?text={{ ('Olá, ' ~ colaborador.nome ~ '! Cadastre seu rosto para bater o ponto neste link: ' ~ link) | urlencode }}">
+      💬 Enviar por WhatsApp
+    </a>
+    <a class="btn-secundario" style="margin-top:0;"
+       href="mailto:{{ colaborador.email }}?subject={{ 'Cadastro facial - ponto' | urlencode }}&body={{ ('Ola, ' ~ colaborador.nome ~ '! Cadastre seu rosto para bater o ponto neste link: ' ~ link) | urlencode }}">
+      ✉️ Enviar por e-mail
+    </a>
+  </div>
+
+  <p id="copiado-aviso" class="ajuste-motivo" style="display:none; color: var(--cor-primaria);">
+    ✅ Link copiado.
+  </p>
+</div>
+
+<div class="card card-aviso">
+  <h2 style="font-size:1rem; margin-top:0;">⚠️ Antes de enviar, confira</h2>
+  <ul style="margin:0; padding-left:1.2rem; line-height:1.7;">
+    <li><strong>Mande só para {{ colaborador.nome }}.</strong> Quem abrir o link cadastra o rosto
+      que estiver na frente da câmera no nome dele — e é esse rosto que vai bater o ponto.</li>
+    <li>Vale <strong>uma vez só</strong> e expira em {{ expira_em | brasilia }} (horário de Brasília).</li>
+    <li>Gerar um link novo para esta pessoa <strong>invalida este aqui na hora</strong>.</li>
+    <li>Peça uma foto de frente, com boa luz, sem óculos escuros e sem boné — a foto do
+      cadastro define a qualidade de todas as batidas futuras.</li>
+  </ul>
+</div>
+
+<a class="btn-secundario" href="{{ url_for('gestor_cadastro') }}">← Voltar para o cadastro</a>
+
+<script>
+  document.getElementById('btn-copiar').addEventListener('click', () => {
+    const campo = document.getElementById('link-convite');
+    const aviso = document.getElementById('copiado-aviso');
+
+    const mostrarOk = () => {
+      aviso.style.display = 'block';
+      setTimeout(() => { aviso.style.display = 'none'; }, 3000);
+    };
+
+    // navigator.clipboard só existe em contexto seguro (https). O select()+execCommand
+    // continua como reserva para quando o gestor abrir o painel por http.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(campo.value).then(mostrarOk).catch(() => {
+        campo.select();
+        document.execCommand('copy');
+        mostrarOk();
+      });
+    } else {
+      campo.select();
+      document.execCommand('copy');
+      mostrarOk();
+    }
+  });
+</script>
+
+{% endblock %}

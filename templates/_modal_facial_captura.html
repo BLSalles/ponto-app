@@ -55,7 +55,7 @@
   let torchLigado = false;
 
   function abrirCamera(facingMode) {
-    return navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 640 }, height: { ideal: 480 } } })
+    return navigator.mediaDevices.getUserMedia({ video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } } })
       .then(stream => {
         streamAtual = stream;
         trilhaVideoAtual = stream.getVideoTracks()[0];
@@ -100,11 +100,7 @@
   });
 
   btnCapturar.addEventListener('click', () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 480;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-    const foto = canvas.toDataURL('image/jpeg', 0.85);
+    const foto = window.capturarFrameFacial(video);
 
     inputFoto.value = foto;
     fotoStatus.innerHTML = '<span class="status-dot ok"></span> Foto capturada com sucesso';

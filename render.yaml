@@ -20,6 +20,13 @@ services:
       # 429 com frequência e deixam alguns registros sem endereço.
       - key: LOCATIONIQ_API_KEY
         sync: false
+      # Rigidez do reconhecimento facial na batida do ponto (0.30 a 0.70; padrão 0.55).
+      # Quanto MENOR, mais rígido. Se os colaboradores estiverem apanhando pra bater o
+      # ponto, suba de 0.05 em 0.05 — o log do Render imprime a distância real de cada
+      # tentativa ("[facial] Rejeitado: ... distância=0.5831"), então dá pra calibrar em
+      # cima dos números em vez de chutar.
+      - key: FACE_MATCH_TOLERANCE
+        sync: false
       - key: DATABASE_URL
         fromDatabase:
           name: ponto-db

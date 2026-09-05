@@ -209,6 +209,12 @@ def montar_jornadas(registros):
 
     Segue a mesma convenção de montar_resumo_diario() no app: uma jornada que
     atravessa a meia-noite pertence ao dia em que a ENTRADA aconteceu.
+
+    Atenção ao comparar com o relatório de horas do app: aqui cada linha é a jornada
+    CRUA (entrada -> saída, do jeito que foi batida). O resumo diário do app fatia uma
+    jornada que vira a noite no horário de entrada padrão do dia seguinte, porque dali em
+    diante já é o expediente normal do outro dia — então as horas por DIA podem divergir
+    das horas por JORNADA daqui, de propósito.
     """
     from collections import defaultdict
 
